@@ -14,6 +14,7 @@
 //!   [variable: LEB128-encoded deltas for each block]
 
 const std = @import("std");
+const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn DeltaVarint(comptime ValueType: type) type {
     const value_size = @sizeOf(ValueType);
@@ -24,15 +25,35 @@ pub fn DeltaVarint(comptime ValueType: type) type {
         // Header: count(u32) + block_size(u16)
         const HEADER_SIZE: u32 = 6;
 
+        /// Encode a sorted sequence using ArenaConfig with default block size (64).
+        /// Temp buffers use `arena.temp`, output uses `arena.output`.
+        pub fn encodeArena(arena: ArenaConfig, values: []const ValueType) ![]u8 {
+            return encodeWithBlockSizeArena(arena, values, 64);
+        }
+
         /// Encode a sorted sequence of values with default block size (64).
         pub fn encode(allocator: std.mem.Allocator, values: []const ValueType) ![]u8 {
             return encodeWithBlockSize(allocator, values, 64);
         }
 
+        /// Encode with a specified block size using ArenaConfig.
+        pub fn encodeWithBlockSizeArena(arena: ArenaConfig, values: []const ValueType, block_size: u16) ![]u8 {
+            return encodeImpl(arena.temp, arena.output, values, block_size);
+        }
+
         /// Encode with a specified block size.
         pub fn encodeWithBlockSize(allocator: std.mem.Allocator, values: []const ValueType, block_size: u16) ![]u8 {
+            return encodeImpl(allocator, allocator, values, block_size);
+        }
+
+        fn encodeImpl(
+            temp_alloc: std.mem.Allocator,
+            out_alloc: std.mem.Allocator,
+            values: []const ValueType,
+            block_size: u16,
+        ) ![]u8 {
             if (values.len == 0) {
-                const data = try allocator.alloc(u8, HEADER_SIZE);
+                const data = try out_alloc.alloc(u8, HEADER_SIZE);
                 std.mem.writeInt(u32, data[0..4], 0, .little);
                 std.mem.writeInt(u16, data[4..6], block_size, .little);
                 return data;
@@ -43,11 +64,11 @@ pub fn DeltaVarint(comptime ValueType: type) type {
 
             // Phase 1: Encode all deltas into a temporary buffer
             var delta_buf = std.ArrayListUnmanaged(u8){};
-            defer delta_buf.deinit(allocator);
+            defer delta_buf.deinit(temp_alloc);
 
             // Track byte offset of each block's deltas
-            var block_offsets = try allocator.alloc(u32, num_blocks);
-            defer allocator.free(block_offsets);
+            var block_offsets = try temp_alloc.alloc(u32, num_blocks);
+            defer temp_alloc.free(block_offsets);
 
             for (0..num_blocks) |bi| {
                 block_offsets[bi] = @intCast(delta_buf.items.len);
@@ -58,7 +79,7 @@ pub fn DeltaVarint(comptime ValueType: type) type {
                 // First value in block is stored as absolute; encode deltas for the rest
                 for (block_start + 1..block_end) |i| {
                     const delta = values[i] - values[i - 1];
-                    try writeLeb128(&delta_buf, allocator, delta);
+                    try writeLeb128(&delta_buf, temp_alloc, delta);
                 }
             }
 
@@ -68,7 +89,7 @@ pub fn DeltaVarint(comptime ValueType: type) type {
             const offsets_section_size: u32 = num_blocks * 4;
             const total_size: u32 = HEADER_SIZE + abs_section_size + offsets_section_size + @as(u32, @intCast(delta_buf.items.len));
 
-            const data = try allocator.alloc(u8, total_size);
+            const data = try out_alloc.alloc(u8, total_size);
 
             // Header
             std.mem.writeInt(u32, data[0..4], n, .little);

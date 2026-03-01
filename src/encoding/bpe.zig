@@ -10,6 +10,7 @@
 //!   [num_merges * 2 bytes: pair (left, right) for token 0x80, 0x81, ...]
 
 const std = @import("std");
+const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn Bpe(comptime IndexType: type) type {
     comptime {
@@ -36,9 +37,18 @@ pub fn Bpe(comptime IndexType: type) type {
 
         // ── Build-time ──
 
+        /// Train a merge table using ArenaConfig. Working buffers use `arena.temp`.
+        pub fn trainArena(arena: ArenaConfig, corpus: []const []const u8, max_merges: u16) !BpeTable {
+            return trainImpl(arena.temp, corpus, max_merges);
+        }
+
         /// Train a merge table from a corpus of byte slices.
         /// Iteratively finds the most frequent byte pair and replaces it with a new token.
         pub fn train(allocator: std.mem.Allocator, corpus: []const []const u8, max_merges: u16) !BpeTable {
+            return trainImpl(allocator, corpus, max_merges);
+        }
+
+        fn trainImpl(allocator: std.mem.Allocator, corpus: []const []const u8, max_merges: u16) !BpeTable {
             const capped: u8 = @intCast(@min(max_merges, MAX_MERGES));
 
             // Concatenate corpus into a mutable working buffer
@@ -152,6 +162,43 @@ pub fn Bpe(comptime IndexType: type) type {
 
         /// Encode input bytes using the trained table.
         /// Applies merges in order (greedy from first merge to last).
+        /// Encode using ArenaConfig. Working buffer uses `arena.temp`,
+        /// final result allocated from `arena.output`.
+        pub fn encodeArena(arena: ArenaConfig, table: *const BpeTable, input: []const u8) ![]u8 {
+            if (input.len == 0) {
+                return try arena.output.alloc(u8, 0);
+            }
+
+            var buf = try arena.temp.alloc(u8, input.len);
+            defer arena.temp.free(buf);
+            @memcpy(buf, input);
+            var len = input.len;
+
+            for (0..table.num_merges) |m| {
+                const pair = table.merges[m];
+                const token: u8 = @intCast(0x80 + m);
+
+                var write: usize = 0;
+                var read: usize = 0;
+                while (read < len) {
+                    if (read + 1 < len and buf[read] == pair[0] and buf[read + 1] == pair[1]) {
+                        buf[write] = token;
+                        write += 1;
+                        read += 2;
+                    } else {
+                        buf[write] = buf[read];
+                        write += 1;
+                        read += 1;
+                    }
+                }
+                len = write;
+            }
+
+            const result = try arena.output.alloc(u8, len);
+            @memcpy(result, buf[0..len]);
+            return result;
+        }
+
         pub fn encode(allocator: std.mem.Allocator, table: *const BpeTable, input: []const u8) ![]u8 {
             if (input.len == 0) {
                 return try allocator.alloc(u8, 0);
@@ -189,8 +236,17 @@ pub fn Bpe(comptime IndexType: type) type {
             return buf;
         }
 
+        /// Serialize the merge table using ArenaConfig. Output from `arena.output`.
+        pub fn serializeTableArena(arena: ArenaConfig, table: *const BpeTable) ![]u8 {
+            return serializeTableImpl(arena.output, table);
+        }
+
         /// Serialize the merge table into a byte slice.
         pub fn serializeTable(allocator: std.mem.Allocator, table: *const BpeTable) ![]u8 {
+            return serializeTableImpl(allocator, table);
+        }
+
+        fn serializeTableImpl(allocator: std.mem.Allocator, table: *const BpeTable) ![]u8 {
             const size = 1 + @as(usize, table.num_merges) * 2;
             var out = try allocator.alloc(u8, size);
             out[0] = table.num_merges;

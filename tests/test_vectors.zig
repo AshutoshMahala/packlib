@@ -622,3 +622,329 @@ test "BPE: decode(encode(x)) = x (round-trip identity)" {
         try testing.expectEqualStrings(input, decoded);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: BWT – Burrows-Wheeler Transform Reference Vectors
+// Source: Wikipedia "Burrows–Wheeler transform", Worked Example
+// ═══════════════════════════════════════════════════════════════
+
+test "BWT vector: 'banana' → BWT output 'nnbaaa' (classic example)" {
+    // Source: Wikipedia "Burrows–Wheeler transform", Worked example
+    // Using suffix-array-based BWT without sentinel: BWT("banana") = "nnbaaa"
+    const Bwt = packlib.Bwt(u32);
+    const input = "banana";
+    const data = try Bwt.forwardUniform(testing.allocator, input);
+    defer testing.allocator.free(data);
+
+    const bwt_bytes = Bwt.getBwtBytes(data);
+    try testing.expectEqual(@as(usize, 6), bwt_bytes.len);
+    try testing.expectEqualStrings("nnbaaa", bwt_bytes);
+
+    // Round-trip
+    const recovered = try Bwt.inverseUniform(testing.allocator, data);
+    defer testing.allocator.free(recovered);
+    try testing.expectEqualStrings(input, recovered);
+}
+
+test "BWT vector: 'abracadabra' round-trip" {
+    // Source: common BWT example from textbooks
+    const Bwt = packlib.Bwt(u32);
+    const input = "abracadabra";
+    const data = try Bwt.forwardUniform(testing.allocator, input);
+    defer testing.allocator.free(data);
+
+    const recovered = try Bwt.inverseUniform(testing.allocator, data);
+    defer testing.allocator.free(recovered);
+    try testing.expectEqualStrings(input, recovered);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: MTF – Move-to-Front Reference Vectors
+// Source: Wikipedia "Move-to-front transform"
+// ═══════════════════════════════════════════════════════════════
+
+test "MTF vector: 'bananaaa' → known output" {
+    // Source: Wikipedia "Move-to-front transform"
+    // 'b'=98,'a'=97,'n'=110,'a'→1,'n'→2,'a'→1,'a'→0,'a'→0
+    const Mtf = packlib.Mtf;
+    const input = "bananaaa";
+    const result = try Mtf.forwardUniform(testing.allocator, input);
+    defer testing.allocator.free(result);
+
+    // After 'b' (98) moves to front, 'a' (97) shifts from pos 97 to 98.
+    // After 'a' moves to front, 'n' (110) stays at 110.
+    // Then 'a','n' alternate at position 1 until runs of 'a' at 0.
+    try testing.expectEqual(@as(u8, 98), result[0]); // 'b' at pos 98
+    try testing.expectEqual(@as(u8, 98), result[1]); // 'a' shifted to 98
+    try testing.expectEqual(@as(u8, 110), result[2]); // 'n' at pos 110
+    try testing.expectEqual(@as(u8, 1), result[3]); // 'a' at pos 1
+    try testing.expectEqual(@as(u8, 1), result[4]); // 'n' at pos 1
+    try testing.expectEqual(@as(u8, 1), result[5]); // 'a' at pos 1
+    try testing.expectEqual(@as(u8, 0), result[6]); // 'a' at pos 0
+    try testing.expectEqual(@as(u8, 0), result[7]); // 'a' at pos 0
+
+    // Round-trip
+    const back = try Mtf.inverseUniform(testing.allocator, result);
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings(input, back);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: BWT + MTF Pipeline Round-Trip
+// Source: Standard compression pipeline (BWT → MTF → entropy coder)
+// ═══════════════════════════════════════════════════════════════
+
+test "BWT+MTF pipeline vector: round-trip on 'mississippi'" {
+    const Bwt = packlib.Bwt(u32);
+    const Mtf = packlib.Mtf;
+
+    const input = "mississippi";
+    const bwt_data = try Bwt.forwardUniform(testing.allocator, input);
+    defer testing.allocator.free(bwt_data);
+
+    const bwt_bytes = Bwt.getBwtBytes(bwt_data);
+    const mtf_data = try Mtf.forwardUniform(testing.allocator, bwt_bytes);
+    defer testing.allocator.free(mtf_data);
+
+    // BWT+MTF should concentrate values near 0
+    var low_count: usize = 0;
+    for (mtf_data) |v| {
+        if (v < 5) low_count += 1;
+    }
+    try testing.expect(low_count > mtf_data.len / 2);
+
+    // Round-trip: MTF inverse → BWT inverse
+    const mtf_inv = try Mtf.inverseUniform(testing.allocator, mtf_data);
+    defer testing.allocator.free(mtf_inv);
+
+    const orig_idx = Bwt.getOriginalIndex(bwt_data);
+    const bwt_rebuilt = try testing.allocator.alloc(u8, 4 + mtf_inv.len);
+    defer testing.allocator.free(bwt_rebuilt);
+    std.mem.writeInt(u32, bwt_rebuilt[0..4], orig_idx, .little);
+    @memcpy(bwt_rebuilt[4..], mtf_inv);
+
+    const recovered = try Bwt.inverseUniform(testing.allocator, bwt_rebuilt);
+    defer testing.allocator.free(recovered);
+    try testing.expectEqualStrings(input, recovered);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: Elias-Fano Reference Vectors
+// Source: Vigna (2013) "Quasi-Succinct Indices", Definition 3
+// ═══════════════════════════════════════════════════════════════
+
+test "Elias-Fano vector: monotone sequence access and successor" {
+    const EF = packlib.EliasFano(u32);
+    const values = [_]u32{ 2, 3, 5, 7, 11, 13, 24 };
+    const data = try EF.buildUniform(testing.allocator, &values);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(u32, 7), EF.count(data));
+    try testing.expectEqual(@as(u32, 25), EF.universe(data)); // one past max
+
+    // Random access
+    for (values, 0..) |v, i| {
+        try testing.expectEqual(v, EF.get(data, @intCast(i)));
+    }
+
+    // Successor queries (returns index of first element >= target)
+    try testing.expectEqual(@as(u32, 0), EF.successor(data, 0)); // index of first >= 0
+    try testing.expectEqual(@as(u32, 0), EF.successor(data, 2)); // index of first >= 2
+    try testing.expectEqual(values[EF.successor(data, 0)], @as(u32, 2)); // value is 2
+    try testing.expectEqual(values[EF.successor(data, 4)], @as(u32, 5)); // value is 5
+    try testing.expectEqual(values[EF.successor(data, 14)], @as(u32, 24)); // value is 24
+
+    // Contains
+    try testing.expect(EF.contains(data, 7));
+    try testing.expect(!EF.contains(data, 8));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: rANS – Range ANS Reference Vectors
+// Source: Duda (2009), "Asymmetric numeral systems"
+// ═══════════════════════════════════════════════════════════════
+
+test "rANS vector: encode/decode with known frequency distribution" {
+    const R = packlib.Rans(12);
+    const raw_freqs = [_]u32{ 3, 1 };
+    var table = try R.buildFreqTable(testing.allocator, &raw_freqs);
+    defer R.freeFreqTable(testing.allocator, &table);
+
+    // Quantized freqs must sum to 2^12 = 4096
+    try testing.expectEqual(@as(u32, 4096), table.cumul[table.num_symbols]);
+
+    // 75%/25% skew, encode 200 symbols
+    var symbols: [200]u16 = undefined;
+    for (0..200) |i| symbols[i] = if (i % 4 == 0) 1 else 0;
+
+    const encoded = try R.encodeUniform(testing.allocator, &table, &symbols);
+    defer testing.allocator.free(encoded);
+
+    // Compressed output must be smaller than raw
+    try testing.expect(encoded.len < 200);
+
+    const decoded = try R.decodeUniform(testing.allocator, encoded, 200);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualSlices(u16, &symbols, decoded);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: tANS – Table ANS Reference Vectors
+// Source: Collet (2013), FSE / Finite State Entropy
+// ═══════════════════════════════════════════════════════════════
+
+test "tANS vector: encode/decode with known frequency distribution" {
+    const T = packlib.Tans(10);
+    const raw_freqs = [_]u32{ 3, 1 };
+    const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
+    defer testing.allocator.free(freqs);
+
+    // Quantized freqs must sum to 2^10 = 1024
+    var freq_sum: u32 = 0;
+    for (freqs) |f| freq_sum += f;
+    try testing.expectEqual(@as(u32, 1024), freq_sum);
+
+    var tables = try T.buildTables(testing.allocator, freqs);
+    defer T.freeTables(testing.allocator, &tables);
+
+    var symbols: [100]u16 = undefined;
+    for (0..100) |i| symbols[i] = if (i % 4 == 0) 1 else 0;
+
+    const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
+    defer testing.allocator.free(encoded);
+
+    const decoded = try T.decodeUniform(testing.allocator, encoded, 100);
+    defer testing.allocator.free(decoded);
+    try testing.expectEqualSlices(u16, &symbols, decoded);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: LOUDS – Level-Order Unary Degree Sequence Reference Vectors
+// Source: Jacobson (1989), "Space-efficient static trees and graphs"
+// ═══════════════════════════════════════════════════════════════
+
+test "LOUDS vector: binary tree navigation" {
+    // Full binary tree depth 2 (7 nodes):
+    //         0
+    //        / \
+    //       1   2
+    //      / \ / \
+    //     3  4 5  6
+    const L = packlib.Louds(u32);
+    const degrees = [_]u32{ 2, 2, 2, 0, 0, 0, 0 };
+    const data = try L.buildFromDegreesUniform(testing.allocator, &degrees);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(u32, 7), L.numNodes(data));
+
+    // Navigation
+    try testing.expectEqual(@as(u32, 1), L.firstChild(data, 0));
+    try testing.expectEqual(@as(u32, 2), L.lastChild(data, 0));
+    try testing.expectEqual(@as(u32, 3), L.firstChild(data, 1));
+    try testing.expectEqual(@as(u32, 5), L.firstChild(data, 2));
+
+    // Parent relationships
+    try testing.expectEqual(@as(u32, 0), L.parent(data, 1));
+    try testing.expectEqual(@as(u32, 0), L.parent(data, 2));
+    try testing.expectEqual(@as(u32, 1), L.parent(data, 3));
+    try testing.expectEqual(@as(u32, 2), L.parent(data, 6));
+
+    // Subtree size
+    try testing.expectEqual(@as(u32, 7), L.subtreeSize(data, 0));
+    try testing.expectEqual(@as(u32, 3), L.subtreeSize(data, 1));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: FrontCoding Reference Vectors
+// Source: Blandford & Blelloch (2008), "Compact Representations"
+// ═══════════════════════════════════════════════════════════════
+
+test "FrontCoding vector: sorted strings with shared prefixes" {
+    const FC = packlib.FrontCoding;
+    const strings = [_][]const u8{
+        "compact",
+        "compare",
+        "compress",
+        "compute",
+        "data",
+        "database",
+    };
+    const data = try FC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(u32, 6), FC.count(data));
+
+    var buf: [256]u8 = undefined;
+    for (strings, 0..) |expected, i| {
+        const got = try FC.get(data, @intCast(i), &buf);
+        try testing.expectEqualStrings(expected, got);
+    }
+
+    // Search
+    try testing.expectEqual(@as(u32, 2), (try FC.find(data, "compress", &buf)).?);
+    try testing.expect((try FC.find(data, "complex", &buf)) == null);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: WaveletTree Reference Vectors
+// Source: Grossi et al. (2003), "High-order entropy-compressed text indexes"
+// ═══════════════════════════════════════════════════════════════
+
+test "WaveletTree vector: rank and select on text" {
+    const WT = packlib.WaveletTree(u32);
+    const input = "abracadabra";
+    const data = try WT.buildUniform(testing.allocator, input);
+    defer testing.allocator.free(data);
+
+    // Access
+    for (input, 0..) |ch, i| {
+        try testing.expectEqual(ch, WT.access(data, @intCast(i)));
+    }
+
+    // Rank: count 'a' in [0..pos)
+    // "abracadabra" → 'a' at positions 0, 3, 5, 7, 10
+    try testing.expectEqual(@as(u32, 1), WT.rank(data, 'a', 1));
+    try testing.expectEqual(@as(u32, 2), WT.rank(data, 'a', 4));
+    try testing.expectEqual(@as(u32, 5), WT.rank(data, 'a', 11));
+
+    // Select: position of k-th 'a' (0-indexed)
+    try testing.expectEqual(@as(u32, 0), WT.select(data, 'a', 0));
+    try testing.expectEqual(@as(u32, 3), WT.select(data, 'a', 1));
+    try testing.expectEqual(@as(u32, 10), WT.select(data, 'a', 4));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tier 2: DAFSA Reference Vectors
+// Source: Daciuk et al. (2000), "Incremental Construction of Minimal
+//         Acyclic Finite State Automata"
+// ═══════════════════════════════════════════════════════════════
+
+test "DAFSA vector: standard dictionary membership" {
+    const D = packlib.Dafsa;
+    const words = [_][]const u8{
+        "abc",
+        "abcd",
+        "abd",
+        "bc",
+        "bcd",
+        "cd",
+    };
+    const data = try D.buildUniform(testing.allocator, &words);
+    defer testing.allocator.free(data);
+
+    // Positive membership
+    for (words) |w| {
+        try testing.expect(D.contains(data, w));
+    }
+
+    // Negative membership
+    try testing.expect(!D.contains(data, "ab"));
+    try testing.expect(!D.contains(data, "a"));
+    try testing.expect(!D.contains(data, "abce"));
+    try testing.expect(!D.contains(data, "d"));
+
+    // Prefix queries
+    try testing.expect(D.hasPrefix(data, "ab"));
+    try testing.expect(D.hasPrefix(data, "bc"));
+    try testing.expect(!D.hasPrefix(data, "e"));
+}

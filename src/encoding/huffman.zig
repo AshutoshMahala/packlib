@@ -13,6 +13,7 @@
 const std = @import("std");
 const BitReader = @import("../io/bit_reader.zig").BitReader;
 const BitWriter = @import("../io/bit_writer.zig").BitWriter;
+const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn HuffmanCodec(comptime FreqType: type) type {
     return struct {
@@ -42,9 +43,19 @@ pub fn HuffmanCodec(comptime FreqType: type) type {
 
         // ── Build-time ──
 
+        /// Build a Huffman code table using ArenaConfig.
+        /// Temp allocations (heap, priority queue) use `arena.temp`.
+        pub fn buildTableArena(arena: ArenaConfig, frequencies: []const FreqType) !HuffmanTable {
+            return buildTableImpl(arena.temp, frequencies);
+        }
+
         /// Build a Huffman code table from symbol frequencies.
         /// `frequencies` is indexed by symbol value; freq[i] = frequency of symbol i.
         pub fn buildTable(allocator: std.mem.Allocator, frequencies: []const FreqType) !HuffmanTable {
+            return buildTableImpl(allocator, frequencies);
+        }
+
+        fn buildTableImpl(allocator: std.mem.Allocator, frequencies: []const FreqType) !HuffmanTable {
             const num_syms: u16 = @intCast(@min(frequencies.len, MAX_SYMBOLS));
 
             // Count active symbols
