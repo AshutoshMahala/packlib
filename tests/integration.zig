@@ -137,11 +137,11 @@ test "DeltaVarint: encode sorted sequence and random access" {
 }
 
 test "BPE: train → encode → decode round-trip" {
-    const B = packlib.Bpe(u32);
+    const B = packlib.Bpe(u8, 128);
     const corpus = [_][]const u8{ "the quick brown fox", "the quick brown fox", "the quick brown fox" };
-    const table = try B.train(testing.allocator, &corpus, 5);
+    const table = try B.train(testing.allocator, &corpus, .{});
 
-    const input = "the quick brown fox";
+    const input: []const u8 = "the quick brown fox";
     const encoded = try B.encode(testing.allocator, &table, input);
     defer testing.allocator.free(encoded);
 
@@ -150,7 +150,7 @@ test "BPE: train → encode → decode round-trip" {
     const view = B.TableView{ .merges = table.merges, .num_merges = table.num_merges };
     var buf: [256]u8 = undefined;
     const decoded = try B.decode(&view, encoded, &buf);
-    try testing.expectEqualStrings(input, decoded);
+    try testing.expectEqualSlices(u8, input, decoded);
 }
 
 test "Entropy + Huffman: entropy-driven encoding" {

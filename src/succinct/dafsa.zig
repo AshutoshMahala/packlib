@@ -357,6 +357,180 @@ pub const Dafsa = struct {
         }
         return null;
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // Compact serialization — optimized for small string sets.
+    //
+    // Format (all little-endian):
+    //   [u16: num_states]
+    //   [u16: num_edges]
+    //   [num_states bytes: degree per state (u8)]
+    //   [ceil(num_states/8) bytes: finals bitvector]
+    //   [num_edges × 3 bytes: (u8 label, u16 target) per edge]
+    //
+    // Total: 4 + S + ceil(S/8) + E×3 bytes
+    //   where S = num_states, E = num_edges.
+    //
+    // For first_names_en (S=18945, E=18944):
+    //   4 + 18945 + 2369 + 56832 = ~78KB (1.62× raw) vs 189KB (3.94× raw)
+    //
+    // Query-time: zero allocation. Degree scan O(state_index) for edge lookup
+    // can be avoided by caching cumulative offsets or using binary search.
+    // ═══════════════════════════════════════════════════════════
+
+    const COMPACT_MAGIC: u8 = 0xDA; // distinguisher byte
+
+    /// Build a compact DAFSA from a sorted list of strings.
+    /// Requires num_states ≤ 65535 and max degree ≤ 255.
+    pub fn buildCompact(arena: ArenaConfig, strings: []const []const u8) ![]u8 {
+        return buildCompactImpl(arena.temp, arena.output, strings);
+    }
+
+    pub fn buildCompactUniform(allocator: std.mem.Allocator, strings: []const []const u8) ![]u8 {
+        return buildCompactImpl(allocator, allocator, strings);
+    }
+
+    fn buildCompactImpl(
+        temp: std.mem.Allocator,
+        output: std.mem.Allocator,
+        strings: []const []const u8,
+    ) ![]u8 {
+        // First build the standard DAFSA to get the minimized automaton
+        const standard = try buildImpl(temp, temp, strings);
+        defer temp.free(standard);
+
+        const ns = numStates(standard);
+        const ne = numEdges(standard);
+
+        // Enforce u16 limits
+        if (ns > 65535 or ne > 65535) return Error.InvalidData;
+
+        const num_states_16: u16 = @intCast(ns);
+        const num_edges_16: u16 = @intCast(ne);
+
+        // Calculate sizes
+        const finals_bytes = (@as(u32, ns) + 7) / 8;
+        const header_size: u32 = 5; // magic(1) + num_states(2) + num_edges(2)
+        const degrees_size: u32 = ns;
+        const edges_size: u32 = ne * 3; // u8 label + u16 target
+        const total_size = header_size + degrees_size + finals_bytes + edges_size;
+
+        const result = try output.alloc(u8, total_size);
+
+        var off: u32 = 0;
+
+        // Header
+        result[off] = COMPACT_MAGIC;
+        off += 1;
+        std.mem.writeInt(u16, result[off..][0..2], num_states_16, .little);
+        off += 2;
+        std.mem.writeInt(u16, result[off..][0..2], num_edges_16, .little);
+        off += 2;
+
+        // Degrees (1 byte per state)
+        for (0..ns) |i| {
+            const s: u32 = @intCast(i);
+            const count = getEdgeCount(standard, s);
+            if (count > 255) return Error.InvalidData;
+            result[off] = @intCast(count);
+            off += 1;
+        }
+
+        // Finals bitvector
+        const finals_start = off;
+        @memset(result[finals_start..][0..finals_bytes], 0);
+        for (0..ns) |i| {
+            const s: u32 = @intCast(i);
+            if (isFinal(standard, s)) {
+                const byte_idx = s / 8;
+                const bit_idx: u3 = @intCast(s % 8);
+                result[finals_start + byte_idx] |= @as(u8, 1) << bit_idx;
+            }
+        }
+        off += finals_bytes;
+
+        // Edges: label(u8) + target(u16), in state order
+        const old_edge_base: u32 = 8 + ns * 4 + ns;
+        for (0..ne) |i| {
+            const e: u32 = @intCast(i);
+            const e_off = old_edge_base + e * 5;
+            result[off] = standard[e_off]; // label
+            off += 1;
+            const target = std.mem.readInt(u32, standard[e_off + 1 ..][0..4], .little);
+            std.mem.writeInt(u16, result[off..][0..2], @intCast(target), .little);
+            off += 2;
+        }
+
+        return result;
+    }
+
+    // ── Compact query-time (zero-alloc on []const u8) ──
+
+    /// Check if a string is in the compact DAFSA.
+    pub fn containsCompact(data: []const u8, word: []const u8) bool {
+        var state: u16 = 0; // root is always state 0
+        for (word) |ch| {
+            if (findEdgeCompact(data, state, ch)) |target| {
+                state = target;
+            } else {
+                return false;
+            }
+        }
+        return isFinalCompact(data, state);
+    }
+
+    /// Check if any string in the compact DAFSA has the given prefix.
+    pub fn hasPrefixCompact(data: []const u8, prefix: []const u8) bool {
+        var state: u16 = 0;
+        for (prefix) |ch| {
+            if (findEdgeCompact(data, state, ch)) |target| {
+                state = target;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Number of states in compact format.
+    pub fn numStatesCompact(data: []const u8) u16 {
+        return std.mem.readInt(u16, data[1..3], .little);
+    }
+
+    /// Number of edges in compact format.
+    pub fn numEdgesCompact(data: []const u8) u16 {
+        return std.mem.readInt(u16, data[3..5], .little);
+    }
+
+    fn isFinalCompact(data: []const u8, state: u16) bool {
+        const ns: u32 = numStatesCompact(data);
+        const finals_off: u32 = 5 + ns; // after header + degrees
+        const byte_idx = @as(u32, state) / 8;
+        const bit_idx: u3 = @intCast(@as(u32, state) % 8);
+        return (data[finals_off + byte_idx] & (@as(u8, 1) << bit_idx)) != 0;
+    }
+
+    fn findEdgeCompact(data: []const u8, state: u16, label: u8) ?u16 {
+        const ns: u32 = numStatesCompact(data);
+        const finals_bytes = (ns + 7) / 8;
+        const edges_start: u32 = 5 + ns + finals_bytes;
+
+        // Compute cumulative edge offset for this state by summing degrees
+        var edge_off: u32 = 0;
+        for (0..state) |i| {
+            edge_off += data[5 + i]; // degree of state i
+        }
+        const degree_val = data[5 + state];
+
+        // Scan edges for this state
+        for (0..degree_val) |i| {
+            const e_off = edges_start + (edge_off + @as(u32, @intCast(i))) * 3;
+            if (data[e_off] == label) {
+                return std.mem.readInt(u16, data[e_off + 1 ..][0..2], .little);
+            }
+        }
+        return null;
+    }
 };
 
 // ═════════════════════════════════════════════════════════════
@@ -469,4 +643,90 @@ test "DAFSA: ArenaConfig variant" {
     try testing.expect(Dafsa.contains(data, "foobaz"));
     try testing.expect(!Dafsa.contains(data, "fooba"));
     try testing.expect(!Dafsa.contains(data, "foobarr"));
+}
+
+// ── Compact format tests ──
+
+test "DAFSA compact: basic membership" {
+    const strings = [_][]const u8{ "cat", "cats", "dog", "dogs" };
+    const data = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expect(Dafsa.containsCompact(data, "cat"));
+    try testing.expect(Dafsa.containsCompact(data, "cats"));
+    try testing.expect(Dafsa.containsCompact(data, "dog"));
+    try testing.expect(Dafsa.containsCompact(data, "dogs"));
+
+    try testing.expect(!Dafsa.containsCompact(data, "ca"));
+    try testing.expect(!Dafsa.containsCompact(data, "do"));
+    try testing.expect(!Dafsa.containsCompact(data, "bat"));
+    try testing.expect(!Dafsa.containsCompact(data, ""));
+}
+
+test "DAFSA compact: prefix query" {
+    const strings = [_][]const u8{ "apple", "application", "apply" };
+    const data = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expect(Dafsa.hasPrefixCompact(data, "app"));
+    try testing.expect(Dafsa.hasPrefixCompact(data, "appl"));
+    try testing.expect(Dafsa.hasPrefixCompact(data, "apple"));
+    try testing.expect(!Dafsa.hasPrefixCompact(data, "b"));
+    try testing.expect(!Dafsa.hasPrefixCompact(data, "az"));
+}
+
+test "DAFSA compact: suffix sharing" {
+    const strings = [_][]const u8{ "listing", "testing" };
+    const data = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expect(Dafsa.containsCompact(data, "listing"));
+    try testing.expect(Dafsa.containsCompact(data, "testing"));
+    try testing.expect(!Dafsa.containsCompact(data, "ting"));
+    try testing.expect(!Dafsa.containsCompact(data, "list"));
+}
+
+test "DAFSA compact: many words with shared suffixes" {
+    const strings = [_][]const u8{
+        "acted",
+        "baked",
+        "biked",
+        "hiked",
+        "liked",
+    };
+    const data = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    for (strings) |w| {
+        try testing.expect(Dafsa.containsCompact(data, w));
+    }
+    try testing.expect(!Dafsa.containsCompact(data, "ked"));
+    try testing.expect(!Dafsa.containsCompact(data, "bake"));
+}
+
+test "DAFSA compact: single string" {
+    const strings = [_][]const u8{"hello"};
+    const data = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expect(Dafsa.containsCompact(data, "hello"));
+    try testing.expect(!Dafsa.containsCompact(data, "hell"));
+    try testing.expect(!Dafsa.containsCompact(data, "helloo"));
+}
+
+test "DAFSA compact: size vs standard" {
+    const strings = [_][]const u8{
+        "acted",
+        "baked",
+        "biked",
+        "hiked",
+        "liked",
+    };
+    const standard = try Dafsa.buildUniform(testing.allocator, &strings);
+    defer testing.allocator.free(standard);
+    const compact = try Dafsa.buildCompactUniform(testing.allocator, &strings);
+    defer testing.allocator.free(compact);
+
+    // Compact must be smaller
+    try testing.expect(compact.len < standard.len);
 }

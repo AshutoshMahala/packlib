@@ -27,6 +27,13 @@ const BLOCK_BITS: u32 = 64;
 const BLOCKS_PER_SUPER: u32 = SUPERBLOCK_BITS / BLOCK_BITS; // 4
 
 pub fn RankSelect(comptime IndexType: type) type {
+    comptime {
+        const info = @typeInfo(IndexType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("RankSelect: IndexType must be an unsigned integer type, got " ++ @typeName(IndexType));
+        if (@sizeOf(IndexType) < 2)
+            @compileError("RankSelect: IndexType must be at least u16");
+    }
     const index_size = @sizeOf(IndexType);
 
     return struct {
@@ -88,24 +95,26 @@ pub fn RankSelect(comptime IndexType: type) type {
                 writeIndex(data, super_start + @as(u32, @intCast(si)) * index_size, cumulative);
 
                 const super_bit_start = si * SUPERBLOCK_BITS;
-                var delta: u8 = 0;
+                var delta: u16 = 0;
 
                 for (0..BLOCKS_PER_SUPER) |bi| {
                     const block_bit_start = super_bit_start + bi * BLOCK_BITS;
                     if (block_bit_start >= n) break;
 
-                    // Write block delta
-                    data[block_start + block_idx] = delta;
+                    // Write block delta (truncate to u8 — max written value is
+                    // sum of ones from previous blocks within the superblock,
+                    // which is at most SUPERBLOCK_BITS - BLOCK_BITS = 192)
+                    data[block_start + block_idx] = @intCast(delta);
                     block_idx += 1;
 
                     // Count ones in this block
                     const block_bit_end = @min(block_bit_start + BLOCK_BITS, @as(usize, @intCast(n)));
-                    var block_ones: u8 = 0;
+                    var block_ones: u16 = 0;
                     for (block_bit_start..block_bit_end) |j| {
                         block_ones += bits[j];
                     }
                     delta += block_ones;
-                    cumulative += block_ones;
+                    cumulative += @intCast(block_ones);
                 }
             }
 

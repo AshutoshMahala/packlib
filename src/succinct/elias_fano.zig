@@ -34,6 +34,13 @@ const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 const RankSelect = @import("rank_select.zig").RankSelect;
 
 pub fn EliasFano(comptime IndexType: type) type {
+    comptime {
+        const info = @typeInfo(IndexType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("EliasFano: IndexType must be an unsigned integer type, got " ++ @typeName(IndexType));
+        if (@sizeOf(IndexType) < 2)
+            @compileError("EliasFano: IndexType must be at least u16");
+    }
     const index_size = @sizeOf(IndexType);
     const RS = RankSelect(IndexType);
 

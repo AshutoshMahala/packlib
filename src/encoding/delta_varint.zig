@@ -17,6 +17,13 @@ const std = @import("std");
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn DeltaVarint(comptime ValueType: type) type {
+    comptime {
+        const info = @typeInfo(ValueType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("DeltaVarint: ValueType must be an unsigned integer type, got " ++ @typeName(ValueType));
+        if (@sizeOf(ValueType) < 2)
+            @compileError("DeltaVarint: ValueType must be at least u16");
+    }
     const value_size = @sizeOf(ValueType);
 
     return struct {

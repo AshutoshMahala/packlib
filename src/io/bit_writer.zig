@@ -13,6 +13,13 @@
 const std = @import("std");
 
 pub fn BitWriter(comptime OffsetType: type) type {
+    comptime {
+        const info = @typeInfo(OffsetType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("BitWriter: OffsetType must be an unsigned integer type, got " ++ @typeName(OffsetType));
+        if (@sizeOf(OffsetType) < 2)
+            @compileError("BitWriter: OffsetType must be at least u16");
+    }
     return struct {
         const Self = @This();
 

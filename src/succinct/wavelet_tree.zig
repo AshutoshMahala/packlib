@@ -38,6 +38,13 @@ const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 const RankSelect = @import("../succinct/rank_select.zig").RankSelect;
 
 pub fn WaveletTree(comptime IndexType: type) type {
+    comptime {
+        const info = @typeInfo(IndexType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("WaveletTree: IndexType must be an unsigned integer type, got " ++ @typeName(IndexType));
+        if (@sizeOf(IndexType) < 2)
+            @compileError("WaveletTree: IndexType must be at least u16");
+    }
     const RS = RankSelect(IndexType);
 
     return struct {

@@ -570,34 +570,35 @@ test "FixedPoint Q16.16: fromFraction(355, 113) ≈ π" {
 
 test "BPE: most frequent pair is merged first" {
     // Fundamental BPE property: the globally most frequent byte pair
-    // is always the first merge.
-    const B = packlib.Bpe(u32);
+    // is always the first merge.  Use max_merges=1 so training stops
+    // after exactly one merge and we can assert which pair was chosen.
+    const B = packlib.Bpe(u8, 1);
     // "ab" appears 6 times, "cd" appears 3 times
     const corpus = [_][]const u8{ "abababababab", "cdcdcd" };
-    const table = try B.train(testing.allocator, &corpus, 1);
-    try testing.expectEqual(@as(u8, 1), table.num_merges);
-    try testing.expectEqual([2]u8{ 'a', 'b' }, table.merges[0]);
+    const table = try B.train(testing.allocator, &corpus, .{});
+    try testing.expectEqual(@as(B.MergeCountType, 1), table.num_merges);
+    try testing.expectEqual(B.SymbolPair{ 'a', 'b' }, table.merges[0]);
 }
 
-test "BPE: tokens use 0x80+ range" {
-    // BPE uses 0x80-0xFF for new tokens (ASCII input is 0x00-0x7F)
-    const B = packlib.Bpe(u32);
+test "BPE: tokens use TOKEN_OFFSET+ range" {
+    // BPE(u8) uses 0x80-0xFF for new tokens (original alphabet 0x00-0x7F)
+    const B = packlib.Bpe(u8, 128);
     const corpus = [_][]const u8{ "aabb", "aabb", "aabb", "aabb" };
-    const table = try B.train(testing.allocator, &corpus, 2);
+    const table = try B.train(testing.allocator, &corpus, .{});
 
-    // Encode and check tokens are ≥ 0x80
+    // Encode and check tokens are ≥ TOKEN_OFFSET
     const encoded = try B.encode(testing.allocator, &table, "aabb");
     defer testing.allocator.free(encoded);
     for (encoded) |b| {
-        if (b >= 0x80) {
+        if (b >= B.TOKEN_OFFSET) {
             // This is a BPE token — valid
-            try testing.expect(b >= 0x80);
+            try testing.expect(b >= B.TOKEN_OFFSET);
         }
     }
 }
 
 test "BPE: decode(encode(x)) = x (round-trip identity)" {
-    const B = packlib.Bpe(u32);
+    const B = packlib.Bpe(u8, 128);
     const texts = [_][]const u8{
         "hello world",
         "the quick brown fox jumps over the lazy dog",
@@ -605,7 +606,7 @@ test "BPE: decode(encode(x)) = x (round-trip identity)" {
         "",
     };
     const corpus = [_][]const u8{ "hello world hello world", "the quick brown fox the quick brown fox" };
-    const table = try B.train(testing.allocator, &corpus, 10);
+    const table = try B.train(testing.allocator, &corpus, .{});
     const view = B.TableView{ .merges = table.merges, .num_merges = table.num_merges };
 
     for (texts) |input| {
@@ -619,7 +620,7 @@ test "BPE: decode(encode(x)) = x (round-trip identity)" {
 
         var buf: [256]u8 = undefined;
         const decoded = try B.decode(&view, encoded, &buf);
-        try testing.expectEqualStrings(input, decoded);
+        try testing.expectEqualSlices(u8, input, decoded);
     }
 }
 
