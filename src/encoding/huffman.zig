@@ -16,6 +16,13 @@ const BitWriter = @import("../io/bit_writer.zig").BitWriter;
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn HuffmanCodec(comptime FreqType: type) type {
+    comptime {
+        const info = @typeInfo(FreqType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("HuffmanCodec: FreqType must be an unsigned integer type, got " ++ @typeName(FreqType));
+        if (@sizeOf(FreqType) < 2)
+            @compileError("HuffmanCodec: FreqType must be at least u16");
+    }
     return struct {
         const Self = @This();
 

@@ -892,7 +892,7 @@ test "FrontCoding vector: sorted strings with shared prefixes" {
 // ═══════════════════════════════════════════════════════════════
 
 test "WaveletTree vector: rank and select on text" {
-    const WT = packlib.WaveletTree(u32);
+    const WT = packlib.WaveletTree(u8, u32);
     const input = "abracadabra";
     const data = try WT.buildUniform(testing.allocator, input);
     defer testing.allocator.free(data);

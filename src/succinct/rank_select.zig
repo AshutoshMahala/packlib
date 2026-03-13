@@ -209,6 +209,30 @@ pub fn RankSelect(comptime IndexType: type) type {
             return @intCast((data[byte_idx] >> bit_idx) & 1);
         }
 
+        /// Validate a serialized RankSelect blob. Call before querying
+        /// if the data comes from an untrusted source.
+        /// Returns `InvalidData` if the header or section layout is inconsistent.
+        pub fn validate(data: []const u8) error{InvalidData}!void {
+            if (data.len < HEADER_SIZE) return error.InvalidData;
+
+            const total_bits = readTotalBits(data);
+            const total_ones = readTotalOnes(data);
+            const num_sb = readNumSuperblocks(data);
+
+            if (total_ones > total_bits) return error.InvalidData;
+
+            // Verify num_superblocks matches total_bits.
+            const expected_sb: IndexType = if (total_bits == 0) 0 else @intCast((@as(u64, total_bits) - 1) / SUPERBLOCK_BITS + 1);
+            if (num_sb != expected_sb) return error.InvalidData;
+
+            // Verify derived section sizes fit within the blob.
+            const raw_bytes: u64 = (@as(u64, total_bits) + 7) / 8;
+            const super_table: u64 = @as(u64, num_sb) * index_size;
+            const num_blocks: u64 = if (total_bits == 0) 0 else (@as(u64, total_bits) - 1) / BLOCK_BITS + 1;
+            const expected_size: u64 = HEADER_SIZE + raw_bytes + super_table + num_blocks;
+            if (expected_size > data.len) return error.InvalidData;
+        }
+
         /// Total number of bits in the vector.
         pub fn totalBits(data: []const u8) IndexType {
             return readTotalBits(data);
@@ -452,4 +476,46 @@ test "RankSelect: large vector (300+ bits) crosses superblock" {
     // Spot-check select
     try testing.expectEqual(@as(u32, 1), RS.select1(data, 0)); // first 1-bit is at position 1
     try testing.expectEqual(@as(u32, 319), RS.select1(data, 159)); // last 1-bit
+}
+
+test "RankSelect: validate accepts valid blob" {
+    const bits = [_]u1{ 1, 0, 1, 1, 0, 0, 1, 0 };
+    const data = try RS.build(testing.allocator, &bits);
+    defer testing.allocator.free(data);
+    try RS.validate(data);
+}
+
+test "RankSelect: validate rejects too-short blob" {
+    try testing.expectError(error.InvalidData, RS.validate(&[_]u8{ 0, 1 }));
+    try testing.expectError(error.InvalidData, RS.validate(&[_]u8{}));
+}
+
+test "RankSelect: validate rejects inflated total_bits" {
+    const bits = [_]u1{ 1, 0, 1, 1, 0, 0, 1, 0 };
+    var data = try RS.build(testing.allocator, &bits);
+    defer testing.allocator.free(data);
+
+    // Corrupt total_bits to a huge value — derived section sizes will exceed blob.
+    std.mem.writeInt(u32, data[0..4], 999999, .little);
+    try testing.expectError(error.InvalidData, RS.validate(data));
+}
+
+test "RankSelect: validate rejects total_ones > total_bits" {
+    const bits = [_]u1{ 1, 0, 1, 1, 0, 0, 1, 0 };
+    var data = try RS.build(testing.allocator, &bits);
+    defer testing.allocator.free(data);
+
+    // Set total_ones to something larger than total_bits (8).
+    std.mem.writeInt(u32, data[4..8], 100, .little);
+    try testing.expectError(error.InvalidData, RS.validate(data));
+}
+
+test "RankSelect: validate rejects wrong num_superblocks" {
+    const bits = [_]u1{ 1, 0, 1, 1, 0, 0, 1, 0 };
+    var data = try RS.build(testing.allocator, &bits);
+    defer testing.allocator.free(data);
+
+    // Corrupt num_superblocks (should be 1 for 8 bits).
+    std.mem.writeInt(u32, data[8..12], 5, .little);
+    try testing.expectError(error.InvalidData, RS.validate(data));
 }

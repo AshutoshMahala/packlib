@@ -40,6 +40,10 @@ const std = @import("std");
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn Tans(comptime scale_bits: u5) type {
+    comptime {
+        if (scale_bits < 2)
+            @compileError("Tans: scale_bits must be at least 2 (table size must be >= 4)");
+    }
     const L: u32 = @as(u32, 1) << scale_bits;
 
     return struct {

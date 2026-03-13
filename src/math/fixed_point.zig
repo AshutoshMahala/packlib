@@ -10,6 +10,14 @@
 //! ```
 
 pub fn FixedPoint(comptime IntBits: u8, comptime FracBits: u8) type {
+    comptime {
+        if (IntBits + FracBits == 0)
+            @compileError("FixedPoint: total bits (IntBits + FracBits) must be > 0");
+        if (FracBits == 0)
+            @compileError("FixedPoint: FracBits must be > 0 (use a plain integer for zero fractional bits)");
+        if (IntBits + FracBits > 64)
+            @compileError("FixedPoint: total bits (IntBits + FracBits) must be <= 64");
+    }
     const total_bits = IntBits + FracBits;
     const BackingType = @Type(.{ .int = .{
         .signedness = .signed,

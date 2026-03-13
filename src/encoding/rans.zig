@@ -43,6 +43,10 @@ const std = @import("std");
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn Rans(comptime scale_bits: u5) type {
+    comptime {
+        if (scale_bits < 2)
+            @compileError("Rans: scale_bits must be at least 2 (SCALE must be >= 4)");
+    }
     const SCALE: u32 = @as(u32, 1) << scale_bits;
     const RANS_L: u32 = 1 << 16; // lower bound on state
 

@@ -34,7 +34,11 @@ const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
 pub fn Bwt(comptime IndexType: type) type {
     comptime {
-        if (@sizeOf(IndexType) < 2) @compileError("IndexType must be at least u16");
+        const info = @typeInfo(IndexType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("Bwt: IndexType must be an unsigned integer type, got " ++ @typeName(IndexType));
+        if (@sizeOf(IndexType) < 2)
+            @compileError("Bwt: IndexType must be at least u16");
     }
     const index_size = @sizeOf(IndexType);
 
