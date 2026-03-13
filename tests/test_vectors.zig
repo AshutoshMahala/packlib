@@ -117,10 +117,10 @@ test "Huffman: Wikipedia 4-symbol example code lengths {0.4, 0.35, 0.2, 0.05}" {
     // Source: Wikipedia "Huffman coding", Compression section
     // Probabilities {0.4, 0.35, 0.2, 0.05} → code lengths {1, 2, 3, 3}
     // Codes: a1=0, a2=10, a3=110, a4=111
-    const HC = packlib.HuffmanCodec(u32);
+    const HC = packlib.HuffmanCodec(u8);
 
     // Scale probabilities × 100 for integer frequencies
-    var freq = [_]u32{0} ** 256;
+    var freq = [_]u64{0} ** 256;
     freq[0] = 40; // a1: 0.4
     freq[1] = 35; // a2: 0.35
     freq[2] = 20; // a3: 0.2
@@ -144,8 +144,8 @@ test "Huffman: canonical codes for known lengths" {
     //   B most frequent → len 1
     //   A next → len 2
     //   C, D least → len 3 each
-    const HC = packlib.HuffmanCodec(u32);
-    var freq = [_]u32{0} ** 256;
+    const HC = packlib.HuffmanCodec(u8);
+    var freq = [_]u64{0} ** 256;
     freq['B'] = 100; // most frequent → shortest code
     freq['A'] = 40; //  next
     freq['C'] = 10; //  least
@@ -178,8 +178,8 @@ test "Huffman: canonical codes for known lengths" {
 test "Huffman: Kraft inequality holds" {
     // Source: Wikipedia "Huffman coding", Optimality/Problem definition
     // For any valid prefix-free code: Σ 2^(-l_i) ≤ 1
-    const HC = packlib.HuffmanCodec(u32);
-    var freq = [_]u32{0} ** 256;
+    const HC = packlib.HuffmanCodec(u8);
+    var freq = [_]u64{0} ** 256;
     freq['a'] = 50;
     freq['b'] = 25;
     freq['c'] = 15;
@@ -201,9 +201,9 @@ test "Huffman: Kraft inequality holds" {
 test "Huffman: weighted path length ≥ entropy (Shannon's source coding theorem)" {
     // Source: Wikipedia "Huffman coding", Example table
     // L(C) ≥ H(A) — weighted average code length is at least the entropy
-    const HC = packlib.HuffmanCodec(u32);
+    const HC = packlib.HuffmanCodec(u8);
 
-    var freq = [_]u32{0} ** 256;
+    var freq = [_]u64{0} ** 256;
     freq['a'] = 10; // p = 0.10
     freq['b'] = 15; // p = 0.15
     freq['c'] = 30; // p = 0.30
@@ -236,14 +236,14 @@ test "Huffman: encode/decode round-trip matches reference" {
     // Source: Wikipedia "Huffman coding" example with "this is an example of a huffman tree"
     // We verify round-trip correctness for the fundamental property:
     // decode(encode(message)) = message
-    const HC = packlib.HuffmanCodec(u32);
+    const HC = packlib.HuffmanCodec(u8);
     const BW = packlib.BitWriter(u32);
     const BR = packlib.BitReader;
 
     const message = "this is an example of a huffman tree";
 
     // Build frequencies from the message itself
-    var freq = [_]u32{0} ** 256;
+    var freq = [_]u64{0} ** 256;
     for (message) |c| freq[c] += 1;
 
     const table = try HC.buildTable(testing.allocator, &freq);
@@ -255,17 +255,15 @@ test "Huffman: encode/decode round-trip matches reference" {
     const bits = try writer.finish();
     defer testing.allocator.free(bits);
 
-    // Build view for decoding
-    var view: HC.TableView = .{
-        .code_lengths = table.code_lengths,
-        .codes = table.codes,
-        .num_symbols = table.num_symbols,
-        .max_code_len = 0,
-    };
-    for (0..256) |i| {
-        if (view.code_lengths[i] > view.max_code_len)
-            view.max_code_len = view.code_lengths[i];
-    }
+    // Build view for decoding via serialize → deserialize round-trip
+    var ser_writer = BW.init(testing.allocator);
+    defer ser_writer.deinit();
+    try HC.serializeTable(&table, &ser_writer);
+    const ser_bytes = try ser_writer.finish();
+    defer testing.allocator.free(ser_bytes);
+
+    var ser_reader = BR.init(ser_bytes);
+    const view = try HC.deserializeTable(&ser_reader);
 
     // Decode
     var reader = BR.init(bits);
@@ -278,8 +276,8 @@ test "Huffman: encode/decode round-trip matches reference" {
 
 test "Huffman: prefix-free property — no code is a prefix of another" {
     // Source: fundamental property of Huffman codes (prefix-free code)
-    const HC = packlib.HuffmanCodec(u32);
-    var freq = [_]u32{0} ** 256;
+    const HC = packlib.HuffmanCodec(u8);
+    var freq = [_]u64{0} ** 256;
     freq['a'] = 40;
     freq['b'] = 35;
     freq['c'] = 20;

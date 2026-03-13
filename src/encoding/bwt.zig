@@ -20,8 +20,8 @@
 //! ## Serialized format
 //!
 //! ```text
-//! [u32: original_index]  — row of the original string in sorted rotation matrix
-//! [n bytes: bwt_output]  — last column of the sorted rotation matrix
+//! [sizeof(IndexType) bytes: original_index]  — row of original string in sorted rotation matrix (LE)
+//! [n bytes: bwt_output]                       — last column of the sorted rotation matrix
 //! ```
 //!
 //! ## References
@@ -43,8 +43,6 @@ pub fn Bwt(comptime IndexType: type) type {
     const index_size = @sizeOf(IndexType);
 
     return struct {
-        const Self = @This();
-
         pub const Error = error{
             EmptyInput,
             InputTooLarge,
@@ -52,8 +50,8 @@ pub fn Bwt(comptime IndexType: type) type {
             InvalidData,
         };
 
-        /// Header: [u32: original_index]
-        const HEADER_SIZE: u32 = @sizeOf(u32);
+        /// Header: [IndexType: original_index]
+        pub const HEADER_SIZE: usize = index_size;
 
         // ── Forward Transform ──
 
@@ -109,11 +107,11 @@ pub fn Bwt(comptime IndexType: type) type {
             }.lessThan);
 
             // Build output: header + last column
-            const total_size = HEADER_SIZE + @as(u32, @intCast(n));
+            const total_size = HEADER_SIZE + @as(usize, @intCast(n));
             const result = try output.alloc(u8, total_size);
 
             // Find original index and build last column
-            var original_index: u32 = 0;
+            var original_index: IndexType = 0;
             for (0..@intCast(n)) |i| {
                 if (sa[i] == 0) {
                     original_index = @intCast(i);
@@ -124,7 +122,7 @@ pub fn Bwt(comptime IndexType: type) type {
             }
 
             // Write header
-            std.mem.writeInt(u32, result[0..4], original_index, .little);
+            std.mem.writeInt(IndexType, result[0..index_size], original_index, .little);
 
             return result;
         }
@@ -149,31 +147,31 @@ pub fn Bwt(comptime IndexType: type) type {
         ) ![]u8 {
             if (data.len <= HEADER_SIZE) return Error.InvalidData;
 
-            const original_index = std.mem.readInt(u32, data[0..4], .little);
+            const original_index = std.mem.readInt(IndexType, data[0..index_size], .little);
             const bwt = data[HEADER_SIZE..];
-            const n: u32 = @intCast(bwt.len);
+            const n: IndexType = @intCast(bwt.len);
 
             if (original_index >= n) return Error.InvalidData;
 
             // LF-mapping based inverse BWT (O(n) time, O(n) space)
             //
             // 1. Count character frequencies
-            var counts: [256]u32 = std.mem.zeroes([256]u32);
+            var counts: [256]IndexType = std.mem.zeroes([256]IndexType);
             for (bwt) |c| counts[c] += 1;
 
             // 2. Compute cumulative counts (first occurrence of each char in F column)
-            var cumul: [257]u32 = undefined;
+            var cumul: [257]IndexType = undefined;
             cumul[0] = 0;
             for (0..256) |i| {
                 cumul[i + 1] = cumul[i] + counts[i];
             }
 
             // 3. Build LF-mapping: T[i] = cumul[bwt[i]] + rank of bwt[i] among bwt[0..i]
-            const lf = try temp.alloc(u32, n);
+            const lf = try temp.alloc(IndexType, n);
             defer temp.free(lf);
 
-            var occ: [256]u32 = std.mem.zeroes([256]u32);
-            for (0..n) |i| {
+            var occ: [256]IndexType = std.mem.zeroes([256]IndexType);
+            for (0..@as(usize, n)) |i| {
                 const c = bwt[i];
                 lf[i] = cumul[c] + occ[c];
                 occ[c] += 1;
@@ -182,7 +180,7 @@ pub fn Bwt(comptime IndexType: type) type {
             // 4. Reconstruct original string by following LF-mapping backwards
             const result = try output_alloc.alloc(u8, n);
             var pos = original_index;
-            var write_pos: u32 = n;
+            var write_pos: IndexType = n;
             while (write_pos > 0) {
                 write_pos -= 1;
                 result[write_pos] = bwt[pos];
@@ -194,18 +192,31 @@ pub fn Bwt(comptime IndexType: type) type {
 
         // ── Queries on serialized BWT data ──
 
+        /// Validate a serialized BWT blob. Call before querying / inverting
+        /// if the data comes from an untrusted source.
+        pub fn validate(data: []const u8) Error!void {
+            if (data.len <= HEADER_SIZE) return Error.InvalidData;
+            if (data.len - HEADER_SIZE > std.math.maxInt(IndexType)) return Error.InvalidData;
+            const n: IndexType = @intCast(data.len - HEADER_SIZE);
+            const original_index = std.mem.readInt(IndexType, data[0..index_size], .little);
+            if (original_index >= n) return Error.InvalidData;
+        }
+
         /// Get the original index from serialized BWT data.
-        pub fn getOriginalIndex(data: []const u8) u32 {
-            return std.mem.readInt(u32, data[0..4], .little);
+        /// Caller must ensure `data.len >= HEADER_SIZE` (use `validate` first for untrusted data).
+        pub fn getOriginalIndex(data: []const u8) IndexType {
+            return std.mem.readInt(IndexType, data[0..index_size], .little);
         }
 
         /// Get the BWT output bytes (last column).
+        /// Caller must ensure `data.len > HEADER_SIZE` (use `validate` first for untrusted data).
         pub fn getBwtBytes(data: []const u8) []const u8 {
             return data[HEADER_SIZE..];
         }
 
         /// Get the length of the original input.
-        pub fn getLength(data: []const u8) u32 {
+        /// Caller must ensure `data.len > HEADER_SIZE` (use `validate` first for untrusted data).
+        pub fn getLength(data: []const u8) IndexType {
             return @intCast(data.len - HEADER_SIZE);
         }
 
@@ -357,6 +368,42 @@ test "BWT: original index is valid" {
     try testing.expectEqual(@as(u32, @intCast(input.len)), len);
 }
 
+test "BWT: validate accepts valid blob" {
+    const B = Bwt(u32);
+    const bwt_data = try B.forwardUniform(testing.allocator, "banana");
+    defer testing.allocator.free(bwt_data);
+    try B.validate(bwt_data);
+}
+
+test "BWT: validate rejects corrupt data" {
+    const B = Bwt(u32);
+
+    // Too short — no BWT bytes.
+    try testing.expectError(error.InvalidData, B.validate(&[_]u8{ 0, 0, 0, 0 }));
+    try testing.expectError(error.InvalidData, B.validate(&[_]u8{}));
+
+    // Invalid original index (>= n).
+    var bad: [5]u8 = undefined;
+    std.mem.writeInt(u32, bad[0..4], 99, .little); // index=99 but n=1
+    bad[4] = 'a';
+    try testing.expectError(error.InvalidData, B.validate(&bad));
+}
+
+test "BWT: u16 round-trip header size" {
+    const B = Bwt(u16);
+    const input = "banana";
+    const bwt_data = try B.forwardUniform(testing.allocator, input);
+    defer testing.allocator.free(bwt_data);
+
+    // Header is now 2 bytes (u16), not 4.
+    try testing.expectEqual(@as(usize, 2 + input.len), bwt_data.len);
+    try B.validate(bwt_data);
+
+    const restored = try B.inverseUniform(testing.allocator, bwt_data);
+    defer testing.allocator.free(restored);
+    try testing.expectEqualSlices(u8, input, restored);
+}
+
 test "BWT: ArenaConfig variant" {
     const B = Bwt(u32);
     const arena = ArenaConfig.uniform(testing.allocator);
@@ -384,7 +431,7 @@ test "BWT: u16 index type" {
 test "BWT: inverse detects invalid data" {
     const B = Bwt(u32);
     // Data too short (just header, no BWT bytes)
-    const short = [_]u8{ 0, 0, 0, 0 };
+    const short: [4]u8 = .{ 0, 0, 0, 0 };
     try testing.expectError(error.InvalidData, B.inverseUniform(testing.allocator, &short));
 
     // Invalid original index (>= n)

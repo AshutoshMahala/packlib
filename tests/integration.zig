@@ -76,12 +76,12 @@ test "RankSelect: build and query" {
 }
 
 test "Huffman: encode → serialize → deserialize → decode" {
-    const HC = packlib.HuffmanCodec(u32);
+    const HC = packlib.HuffmanCodec(u8);
     const BW = packlib.BitWriter(u32);
     const BR = packlib.BitReader;
 
     // Build table from frequency distribution
-    var freq = [_]u32{0} ** 256;
+    var freq = [_]u64{0} ** 256;
     freq['h'] = 1;
     freq['e'] = 1;
     freq['l'] = 3;
