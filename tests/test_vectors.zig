@@ -919,7 +919,7 @@ test "WaveletTree vector: rank and select on text" {
 // ═══════════════════════════════════════════════════════════════
 
 test "DAFSA vector: standard dictionary membership" {
-    const D = packlib.Dafsa;
+    const D = packlib.Dafsa(u8, u32);
     const words = [_][]const u8{
         "abc",
         "abcd",

@@ -41,6 +41,15 @@ pub const ContextModelN = @import("encoding/context_model.zig").ContextModelN;
 pub const Rans = @import("encoding/rans.zig").Rans;
 pub const Tans = @import("encoding/tans.zig").Tans;
 pub const Dafsa = @import("succinct/dafsa.zig").Dafsa;
+/// Convenience alias: `Dafsa(u8, u32)` — the most common instantiation
+/// for byte-string sets. Provided for ergonomics and backward compatibility.
+pub const ByteDafsa = Dafsa(u8, u32);
+/// Comptime utility: returns the smallest unsigned integer type that can
+/// represent every symbol value in the given sequences. Standalone because
+/// the result is a *type*, which only exists at comptime in Zig — a runtime
+/// equivalent is not possible. Used to derive optimal `SymbolType` for
+/// `Dafsa`, `WaveletTree`, `Bpe`, etc.
+pub const detectSymbolType = @import("comptime_utils.zig").detectSymbolType;
 
 // ── Pull in all module tests ─────────────────────────────────
 comptime {
@@ -63,4 +72,5 @@ comptime {
     _ = @import("encoding/rans.zig");
     _ = @import("encoding/tans.zig");
     _ = @import("succinct/dafsa.zig");
+    _ = @import("comptime_utils.zig");
 }
