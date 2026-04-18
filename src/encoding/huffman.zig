@@ -19,7 +19,7 @@
 //!   [max_sym × CODE_LEN_BITS bits: code_lengths] — per-symbol code length, ordered by value
 
 const std = @import("std");
-const BitReader = @import("../io/bit_reader.zig").BitReader;
+const BitReader = @import("../io/bit_reader.zig").BitReader(u32);
 const BitWriter = @import("../io/bit_writer.zig").BitWriter;
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 

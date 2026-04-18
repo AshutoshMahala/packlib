@@ -124,7 +124,7 @@ pub fn BitWriter(comptime OffsetType: type) type {
 
 // ── Tests ────────────────────────────────────────────────────
 const testing = std.testing;
-const BitReader = @import("bit_reader.zig").BitReader; // same directory
+const BitReader = @import("bit_reader.zig").BitReader(u32); // same directory
 
 test "BitWriter: init and position" {
     var writer = BitWriter(u32).init(testing.allocator);

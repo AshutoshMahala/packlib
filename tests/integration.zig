@@ -23,7 +23,7 @@ test "BitWriter → BitReader: encode and decode a structured record" {
     const bytes = try writer.finish();
     defer testing.allocator.free(bytes);
 
-    var reader = packlib.BitReader.init(bytes);
+    var reader = packlib.BitReader(u32).init(bytes);
     try testing.expectEqual(@as(u4, 0b1101), try reader.readBits(u4, 4));
     try testing.expectEqual(@as(u16, 0xBEEF), try reader.readBits(u16, 16));
     try testing.expectEqual(@as(u1, 1), try reader.readBit());
@@ -42,7 +42,7 @@ test "BitWriter → BitReader: multiple records back to back" {
     const bytes = try writer.finish();
     defer testing.allocator.free(bytes);
 
-    var reader = packlib.BitReader.init(bytes);
+    var reader = packlib.BitReader(u32).init(bytes);
     for (0..10) |i| {
         const val = try reader.readBits(u8, 8);
         const len = try reader.readBits(u4, 4);
@@ -78,7 +78,7 @@ test "RankSelect: build and query" {
 test "Huffman: encode → serialize → deserialize → decode" {
     const HC = packlib.HuffmanCodec(u8);
     const BW = packlib.BitWriter(u32);
-    const BR = packlib.BitReader;
+    const BR = packlib.BitReader(u32);
 
     // Build table from frequency distribution
     var freq = [_]u64{0} ** 256;

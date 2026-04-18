@@ -238,7 +238,7 @@ test "Huffman: encode/decode round-trip matches reference" {
     // decode(encode(message)) = message
     const HC = packlib.HuffmanCodec(u8);
     const BW = packlib.BitWriter(u32);
-    const BR = packlib.BitReader;
+    const BR = packlib.BitReader(u32);
 
     const message = "this is an example of a huffman tree";
 
@@ -478,7 +478,7 @@ test "RankSelect: rank0 + rank1 = position" {
 test "BitWriter/Reader: MSB-first byte 0xA5 = 10100101" {
     // 0xA5 in binary MSB-first: 1,0,1,0,0,1,0,1
     const BW = packlib.BitWriter(u32);
-    const BR = packlib.BitReader;
+    const BR = packlib.BitReader(u32);
 
     var writer = BW.init(testing.allocator);
     defer writer.deinit();
@@ -503,7 +503,7 @@ test "BitWriter/Reader: 12-bit value 0xABC across byte boundary" {
     // 0xABC = 101010111100 in 12-bit MSB-first
     // Should split: first byte = 10101011 (0xAB), next 4 bits = 1100 (0xC_)
     const BW = packlib.BitWriter(u32);
-    const BR = packlib.BitReader;
+    const BR = packlib.BitReader(u32);
 
     var writer = BW.init(testing.allocator);
     defer writer.deinit();
@@ -859,7 +859,7 @@ test "LOUDS vector: binary tree navigation" {
 // ═══════════════════════════════════════════════════════════════
 
 test "FrontCoding vector: sorted strings with shared prefixes" {
-    const FC = packlib.FrontCoding;
+    const FC = packlib.FrontCoding(u32);
     const strings = [_][]const u8{
         "compact",
         "compare",

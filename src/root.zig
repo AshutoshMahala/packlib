@@ -9,7 +9,7 @@
 //!
 //! Usage:
 //!   const packlib = @import("packlib");
-//!   var reader = packlib.BitReader.init(data);
+//!   var reader = packlib.BitReader(u32).init(data);
 
 // ── Tier 0: Foundational Primitives ──────────────────────────
 pub const BitReader = @import("io/bit_reader.zig").BitReader;
