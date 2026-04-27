@@ -27,11 +27,31 @@
 //! wide enough to address the total serialized size (e.g. `u16` for < 64 KB,
 //! `u32` for < 4 GB).
 //!
+//! ## Generic parameters
+//!
+//!   - `IndexType` — unsigned int wide enough to address the total serialized
+//!     size and hold the count/offset fields (`u16` for < 64 KB, `u32` for
+//!     < 4 GB).
+//!   - `LengthType` — unsigned int holding per-string lengths within a bucket
+//!     (full_string_length, shared_prefix_length, suffix_length).  Choose by
+//!     the longest string in the dictionary: `u8` for ≤ 255-byte strings,
+//!     `u16` for ≤ 64 KB strings, etc.
+//!
+//! ## Serialized format
+//!
+//! ```text
+//! [IndexType:  num_strings]
+//! [u16:        bucket_size]
+//! [IndexType:  num_buckets]
+//! [num_buckets × IndexType: byte offset of each bucket in the data section]
+//! [variable:   bucket data]
+//! ```
+//!
 //! Each bucket:
 //! ```text
-//! [u16: full_string_length] [bytes: full_string]
+//! [LengthType: full_string_length] [bytes: full_string]
 //! For each subsequent string in bucket:
-//!   [u16: shared_prefix_length] [u16: suffix_length] [bytes: suffix]
+//!   [LengthType: shared_prefix_length] [LengthType: suffix_length] [bytes: suffix]
 //! ```
 //!
 //! ## References
@@ -42,7 +62,7 @@
 const std = @import("std");
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
-pub fn FrontCoding(comptime IndexType: type) type {
+pub fn FrontCoding(comptime IndexType: type, comptime LengthType: type) type {
     comptime {
         const info = @typeInfo(IndexType);
         if (info != .int or info.int.signedness != .unsigned)
@@ -51,9 +71,21 @@ pub fn FrontCoding(comptime IndexType: type) type {
             @compileError("FrontCoding: IndexType must be at least u16");
         if (@bitSizeOf(IndexType) > 64)
             @compileError("FrontCoding: IndexType must be at most u64");
+        if (@bitSizeOf(IndexType) % 8 != 0)
+            @compileError("FrontCoding: IndexType bit width must be a multiple of 8");
+        const l_info = @typeInfo(LengthType);
+        if (l_info != .int or l_info.int.signedness != .unsigned)
+            @compileError("FrontCoding: LengthType must be an unsigned integer type, got " ++ @typeName(LengthType));
+        if (@bitSizeOf(LengthType) < 8)
+            @compileError("FrontCoding: LengthType must be at least u8");
+        if (@bitSizeOf(LengthType) > 32)
+            @compileError("FrontCoding: LengthType must be at most u32");
+        if (@bitSizeOf(LengthType) % 8 != 0)
+            @compileError("FrontCoding: LengthType bit width must be a multiple of 8");
     }
 
-    const index_size = @sizeOf(IndexType);
+    const index_size = @divExact(@bitSizeOf(IndexType), 8);
+    const length_size = @divExact(@bitSizeOf(LengthType), 8);
 
     return struct {
         pub const Error = error{
@@ -105,9 +137,9 @@ pub fn FrontCoding(comptime IndexType: type) type {
                 }
             }
 
-            // Verify no string exceeds u16 max
+            // Verify no string exceeds LengthType max
             for (strings) |s| {
-                if (s.len > std.math.maxInt(u16)) return Error.StringTooLong;
+                if (s.len > std.math.maxInt(LengthType)) return Error.StringTooLong;
             }
 
             const num_buckets: IndexType = @intCast((n + bucket_size - 1) / bucket_size);
@@ -128,8 +160,8 @@ pub fn FrontCoding(comptime IndexType: type) type {
 
                 // First string in bucket: store in full
                 const first = strings[bucket_start];
-                const first_len: u16 = @intCast(first.len);
-                try appendU16(&data_buf, temp, first_len);
+                const first_len: LengthType = @intCast(first.len);
+                try appendLen(&data_buf, temp, first_len);
                 try data_buf.appendSlice(temp, first);
 
                 // Subsequent strings: prefix share + suffix
@@ -138,10 +170,10 @@ pub fn FrontCoding(comptime IndexType: type) type {
                     const curr = strings[i];
 
                     const shared = commonPrefixLen(prev, curr);
-                    const suffix_len: u16 = @intCast(curr.len - shared);
+                    const suffix_len: LengthType = @intCast(curr.len - shared);
 
-                    try appendU16(&data_buf, temp, @intCast(shared));
-                    try appendU16(&data_buf, temp, suffix_len);
+                    try appendLen(&data_buf, temp, @intCast(shared));
+                    try appendLen(&data_buf, temp, suffix_len);
                     try data_buf.appendSlice(temp, curr[shared..]);
                 }
             }
@@ -178,6 +210,78 @@ pub fn FrontCoding(comptime IndexType: type) type {
             return std.mem.readInt(IndexType, data[0..index_size], .little);
         }
 
+        /// Validate a serialized FrontCoding blob. Call before querying
+        /// if the data comes from an untrusted source.
+        ///
+        /// Verifies that:
+        ///   * the header fits and `bucket_size` is non-zero,
+        ///   * `num_buckets` matches `ceil(num_strings / bucket_size)`,
+        ///   * every bucket offset lands inside the blob and is non-decreasing,
+        ///   * every entry header (full string, prefix/suffix pairs) stays in bounds,
+        ///   * shared prefix never exceeds the running reconstructed length.
+        ///
+        /// After `validate(data)` succeeds, `count(data)` and `get(data, i, buf)`
+        /// (with `buf.len >= u16 max`) cannot panic for valid `i`.
+        pub fn validate(data: []const u8) error{InvalidData}!void {
+            if (data.len < HEADER_SIZE) return error.InvalidData;
+
+            const n = std.mem.readInt(IndexType, data[0..index_size], .little);
+            const bucket_size = std.mem.readInt(u16, data[index_size..][0..2], .little);
+            const num_buckets = std.mem.readInt(IndexType, data[index_size + 2 ..][0..index_size], .little);
+
+            if (n == 0) return error.InvalidData;
+            if (bucket_size == 0) return error.InvalidData;
+
+            // Recompute expected bucket count.
+            const expected_buckets: u64 = (@as(u64, n) + bucket_size - 1) / bucket_size;
+            if (@as(u64, num_buckets) != expected_buckets) return error.InvalidData;
+
+            const offsets_size: u64 = @as(u64, num_buckets) * index_size;
+            if (HEADER_SIZE + offsets_size > data.len) return error.InvalidData;
+
+            const data_start: u64 = HEADER_SIZE + offsets_size;
+
+            // Walk buckets, checking each one parses cleanly.
+            var prev_off: u64 = data_start;
+            var bi: IndexType = 0;
+            while (bi < num_buckets) : (bi += 1) {
+                const slot: usize = HEADER_SIZE + @as(usize, bi) * index_size;
+                const off: u64 = std.mem.readInt(IndexType, data[slot..][0..index_size], .little);
+
+                if (off < data_start) return error.InvalidData;
+                if (off > data.len) return error.InvalidData;
+                // Bucket offsets are written in increasing order during encode.
+                if (bi > 0 and off < prev_off) return error.InvalidData;
+                prev_off = off;
+
+                const bucket_start: u64 = @as(u64, bi) * bucket_size;
+                const bucket_end_excl: u64 = @min(bucket_start + bucket_size, @as(u64, n));
+                const entries_in_bucket: u64 = bucket_end_excl - bucket_start;
+
+                // Walk the bucket: full string, then (entries-1) prefix/suffix pairs.
+                var pos: u64 = off;
+                if (pos + length_size > data.len) return error.InvalidData;
+                const first_len: LengthType = std.mem.readInt(LengthType, data[@intCast(pos)..][0..length_size], .little);
+                pos += length_size;
+                if (pos + first_len > data.len) return error.InvalidData;
+                pos += first_len;
+                var current_len: u64 = first_len;
+
+                var k: u64 = 1;
+                while (k < entries_in_bucket) : (k += 1) {
+                    if (pos + 2 * length_size > data.len) return error.InvalidData;
+                    const shared: LengthType = std.mem.readInt(LengthType, data[@intCast(pos)..][0..length_size], .little);
+                    const suffix_len: LengthType = std.mem.readInt(LengthType, data[@intCast(pos + length_size)..][0..length_size], .little);
+                    pos += 2 * length_size;
+                    if (shared > current_len) return error.InvalidData;
+                    if (pos + suffix_len > data.len) return error.InvalidData;
+                    pos += suffix_len;
+                    current_len = @as(u64, shared) + @as(u64, suffix_len);
+                    if (current_len > std.math.maxInt(LengthType)) return error.InvalidData;
+                }
+            }
+        }
+
         /// Get the i-th string, writing it into `buf`.
         /// Returns the slice of `buf` actually used.
         pub fn get(data: []const u8, index: IndexType, buf: []u8) ![]u8 {
@@ -196,19 +300,19 @@ pub fn FrontCoding(comptime IndexType: type) type {
             var pos: usize = bucket_offset;
 
             // Read the first string in the bucket (full string)
-            const first_len = readU16(data, pos);
-            pos += 2;
+            const first_len = readLen(data, pos);
+            pos += length_size;
             if (first_len > buf.len) return Error.BufferTooSmall;
             @memcpy(buf[0..first_len], data[pos..][0..first_len]);
             pos += first_len;
-            var current_len: u16 = first_len;
+            var current_len: LengthType = first_len;
 
             // Walk through subsequent strings in the bucket
             for (0..idx_in_bucket) |_| {
-                const shared: u16 = readU16(data, pos);
-                pos += 2;
-                const suffix_len: u16 = readU16(data, pos);
-                pos += 2;
+                const shared: LengthType = readLen(data, pos);
+                pos += length_size;
+                const suffix_len: LengthType = readLen(data, pos);
+                pos += length_size;
                 const new_len = shared + suffix_len;
                 if (new_len > buf.len) return Error.BufferTooSmall;
 
@@ -253,13 +357,13 @@ pub fn FrontCoding(comptime IndexType: type) type {
             return max;
         }
 
-        fn readU16(data: []const u8, offset: usize) u16 {
-            return std.mem.readInt(u16, data[offset..][0..2], .little);
+        fn readLen(data: []const u8, offset: usize) LengthType {
+            return std.mem.readInt(LengthType, data[offset..][0..length_size], .little);
         }
 
-        fn appendU16(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: u16) !void {
-            var buf: [2]u8 = undefined;
-            std.mem.writeInt(u16, &buf, value, .little);
+        fn appendLen(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: LengthType) !void {
+            var buf: [length_size]u8 = undefined;
+            std.mem.writeInt(LengthType, &buf, value, .little);
             try list.appendSlice(allocator, &buf);
         }
     }; // return struct
@@ -270,7 +374,7 @@ pub fn FrontCoding(comptime IndexType: type) type {
 // ═════════════════════════════════════════════════════════════
 
 const testing = std.testing;
-const DefaultFC = FrontCoding(u32);
+const DefaultFC = FrontCoding(u32, u16);
 test "FrontCoding: basic round-trip" {
     const strings = [_][]const u8{ "apple", "application", "apply", "banana", "bandana" };
     const data = try DefaultFC.encodeUniform(testing.allocator, &strings);
@@ -411,7 +515,7 @@ test "FrontCoding: empty input returns error" {
 // ── u16 IndexType tests ──
 
 test "FrontCoding: u16 IndexType round-trip" {
-    const SmallFC = FrontCoding(u16);
+    const SmallFC = FrontCoding(u16, u16);
     const strings = [_][]const u8{ "cat", "cats", "dog", "dogs", "fish" };
     const data = try SmallFC.encodeUniform(testing.allocator, &strings);
     defer testing.allocator.free(data);
@@ -426,7 +530,7 @@ test "FrontCoding: u16 IndexType round-trip" {
 }
 
 test "FrontCoding: u16 IndexType is smaller than u32" {
-    const SmallFC = FrontCoding(u16);
+    const SmallFC = FrontCoding(u16, u16);
     const strings = [_][]const u8{ "apple", "application", "apply", "banana", "bandana" };
     const small = try SmallFC.encodeUniform(testing.allocator, &strings);
     defer testing.allocator.free(small);
@@ -435,4 +539,74 @@ test "FrontCoding: u16 IndexType is smaller than u32" {
 
     // u16 header fields take less space than u32
     try testing.expect(small.len < large.len);
+}
+
+test "FrontCoding: validate accepts well-formed blob" {
+    const strings = [_][]const u8{ "apple", "application", "apply", "banana", "bandana" };
+    const data = try DefaultFC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+    try DefaultFC.validate(data);
+}
+
+test "FrontCoding: validate rejects truncated blob" {
+    const strings = [_][]const u8{ "apple", "application", "apply", "banana", "bandana" };
+    const data = try DefaultFC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try testing.expectError(error.InvalidData, DefaultFC.validate(data[0..4]));
+    try testing.expectError(error.InvalidData, DefaultFC.validate(data[0 .. data.len - 1]));
+}
+
+test "FrontCoding: validate rejects mismatched bucket count" {
+    const strings = [_][]const u8{ "a", "b", "c" };
+    const data = try DefaultFC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    var corrupted = try testing.allocator.dupe(u8, data);
+    defer testing.allocator.free(corrupted);
+    // num_buckets is at offset index_size + 2 = 6.
+    std.mem.writeInt(u32, corrupted[6..10], 99, .little);
+    try testing.expectError(error.InvalidData, DefaultFC.validate(corrupted));
+}
+
+test "FrontCoding: validate rejects out-of-range bucket offset" {
+    const strings = [_][]const u8{ "a", "b" };
+    const data = try DefaultFC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    var corrupted = try testing.allocator.dupe(u8, data);
+    defer testing.allocator.free(corrupted);
+    // First bucket-offset slot is right after HEADER_SIZE = 4 + 2 + 4 = 10.
+    std.mem.writeInt(u32, corrupted[10..14], 99_999, .little);
+    try testing.expectError(error.InvalidData, DefaultFC.validate(corrupted));
+}
+
+test "FrontCoding(u16, u8): short-string dictionary with byte length type" {
+    const FC = FrontCoding(u16, u8);
+    const strings = [_][]const u8{
+        "alpha",
+        "alphabet",
+        "alphanumeric",
+        "beta",
+        "betacarotene",
+        "gamma",
+    };
+    const data = try FC.encodeUniform(testing.allocator, &strings);
+    defer testing.allocator.free(data);
+
+    try FC.validate(data);
+    try testing.expectEqual(@as(u16, 6), FC.count(data));
+
+    var buf: [256]u8 = undefined;
+    for (strings, 0..) |expected, i| {
+        const got = try FC.get(data, @intCast(i), &buf);
+        try testing.expectEqualStrings(expected, got);
+    }
+}
+
+test "FrontCoding(u16, u8): rejects strings exceeding 255 bytes" {
+    const FC = FrontCoding(u16, u8);
+    const big_string = "x" ** 300;
+    const strings = [_][]const u8{ "a", big_string };
+    try testing.expectError(error.StringTooLong, FC.encodeUniform(testing.allocator, &strings));
 }

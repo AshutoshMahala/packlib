@@ -19,13 +19,18 @@
 //! Encoding reverses decoding: given (symbol, state), emit bits and
 //! transition to the decode-table position that would reconstruct this state.
 //!
+//! ## Generic parameters
+//!
+//!   - `scale_bits` — log₂ of table size (typical: 10–12)
+//!   - `SymbolType` — alphabet width: `u4` (nibble), `u8` (byte), `u12`/`u16` (token)
+//!
 //! ## Serialized format
 //!
 //! ```text
 //! [u32: final_state]         — state after encoding all symbols
 //! [u32: num_output_bits]     — total bits emitted during encoding
 //! [u16: scale_bits]          — log2 of table size
-//! [u16: num_symbols]         — alphabet size
+//! [u32: num_symbols]         — alphabet size
 //! [num_symbols × u16: freqs] — quantized symbol frequencies
 //! [variable: bitstream]      — packed bit output (in decode order)
 //! ```
@@ -39,12 +44,21 @@
 const std = @import("std");
 const ArenaConfig = @import("../memory/arena_config.zig").ArenaConfig;
 
-pub fn Tans(comptime scale_bits: u5) type {
+pub fn Tans(comptime scale_bits: u5, comptime SymbolType: type) type {
     comptime {
         if (scale_bits < 2)
             @compileError("Tans: scale_bits must be at least 2 (table size must be >= 4)");
+        const info = @typeInfo(SymbolType);
+        if (info != .int or info.int.signedness != .unsigned)
+            @compileError("Tans: SymbolType must be an unsigned integer type, got " ++ @typeName(SymbolType));
+        const bits = @bitSizeOf(SymbolType);
+        if (bits == 0)
+            @compileError("Tans: SymbolType must have at least 1 bit");
+        if (bits > 16)
+            @compileError("Tans: SymbolType must be at most 16 bits (alphabet up to 65 536)");
     }
     const L: u32 = @as(u32, 1) << scale_bits;
+    const MAX_ALPHABET: u32 = 1 << @bitSizeOf(SymbolType);
 
     return struct {
         const Self = @This();
@@ -61,7 +75,7 @@ pub fn Tans(comptime scale_bits: u5) type {
         /// Decode table entry: for each state, what symbol it decodes to
         /// and how to compute the next state.
         const DecodeEntry = struct {
-            symbol: u16,
+            symbol: SymbolType,
             nb_bits: u8, // bits to read from stream
             base: u32, // new_state = base + readBits(nb_bits); result in [0, L)
         };
@@ -84,7 +98,7 @@ pub fn Tans(comptime scale_bits: u5) type {
             enc_slots: []EncodeSlot,
             enc_offsets: []u32, // length = num_symbols + 1
             freqs: []u16,
-            num_symbols: u16,
+            num_symbols: u32,
         };
 
         // ── Quantize frequencies ──
@@ -93,11 +107,12 @@ pub fn Tans(comptime scale_bits: u5) type {
             allocator: std.mem.Allocator,
             raw_freqs: []const u32,
         ) ![]u16 {
-            const num_syms: u16 = @intCast(raw_freqs.len);
-            if (num_syms == 0) return Error.InvalidFrequencies;
+            if (raw_freqs.len == 0) return Error.InvalidFrequencies;
+            if (raw_freqs.len > MAX_ALPHABET) return Error.InvalidFrequencies;
+            const num_syms: u32 = @intCast(raw_freqs.len);
 
             var total: u64 = 0;
-            var active: u16 = 0;
+            var active: u32 = 0;
             for (raw_freqs) |f| {
                 total += f;
                 if (f > 0) active += 1;
@@ -122,7 +137,7 @@ pub fn Tans(comptime scale_bits: u5) type {
 
             while (scaled_total != L) {
                 if (scaled_total > L) {
-                    var best: u16 = 0;
+                    var best: u32 = 0;
                     var best_freq: u16 = 0;
                     for (0..num_syms) |i| {
                         if (freqs[i] > 1 and freqs[i] > best_freq) {
@@ -133,7 +148,7 @@ pub fn Tans(comptime scale_bits: u5) type {
                     freqs[best] -= 1;
                     scaled_total -= 1;
                 } else {
-                    var best: u16 = 0;
+                    var best: u32 = 0;
                     var best_raw: u32 = 0;
                     for (0..num_syms) |i| {
                         if (raw_freqs[i] > best_raw) {
@@ -152,7 +167,8 @@ pub fn Tans(comptime scale_bits: u5) type {
         // ── Build tables ──
 
         pub fn buildTables(allocator: std.mem.Allocator, freqs: []const u16) !Tables {
-            const num_syms: u16 = @intCast(freqs.len);
+            if (freqs.len > MAX_ALPHABET) return Error.InvalidFrequencies;
+            const num_syms: u32 = @intCast(freqs.len);
 
             // Verify sum
             var sum_check: u32 = 0;
@@ -160,9 +176,9 @@ pub fn Tans(comptime scale_bits: u5) type {
             if (sum_check != L) return Error.FrequencySumMismatch;
 
             // 1. Build spread using FSE step function
-            const SENTINEL: u16 = 0xFFFF;
-            const spread = try allocator.alloc(u16, L);
+            const spread = try allocator.alloc(u32, L);
             defer allocator.free(spread);
+            const SENTINEL: u32 = 0xFFFF_FFFF;
             @memset(spread, SENTINEL);
 
             const step: u32 = (L >> 1) + (L >> 3) + 3;
@@ -189,10 +205,11 @@ pub fn Tans(comptime scale_bits: u5) type {
             @memset(occurrence, 0);
 
             for (0..L) |p| {
-                const sym = spread[p];
-                const f: u32 = freqs[sym];
-                const k = occurrence[sym];
-                occurrence[sym] = k + 1;
+                const sym_u32 = spread[p];
+                const sym: SymbolType = @intCast(sym_u32);
+                const f: u32 = freqs[sym_u32];
+                const k = occurrence[sym_u32];
+                occurrence[sym_u32] = k + 1;
 
                 // reduced state: f + k (in [f, 2f))
                 const reduced: u32 = f + k;
@@ -224,7 +241,7 @@ pub fn Tans(comptime scale_bits: u5) type {
 
             for (0..L) |p| {
                 const entry = dec[p];
-                const sym = entry.symbol;
+                const sym: u32 = @intCast(entry.symbol);
                 const write_idx = sym_write_pos[sym];
                 sym_write_pos[sym] = write_idx + 1;
 
@@ -270,11 +287,11 @@ pub fn Tans(comptime scale_bits: u5) type {
 
         // ── Encode ──
 
-        pub fn encodeData(arena: ArenaConfig, tables: *const Tables, symbols: []const u16) ![]u8 {
+        pub fn encodeData(arena: ArenaConfig, tables: *const Tables, symbols: []const SymbolType) ![]u8 {
             return encodeImpl(arena.temp, arena.output, tables, symbols);
         }
 
-        pub fn encodeUniform(allocator: std.mem.Allocator, tables: *const Tables, symbols: []const u16) ![]u8 {
+        pub fn encodeUniform(allocator: std.mem.Allocator, tables: *const Tables, symbols: []const SymbolType) ![]u8 {
             return encodeImpl(allocator, allocator, tables, symbols);
         }
 
@@ -282,7 +299,7 @@ pub fn Tans(comptime scale_bits: u5) type {
             temp_alloc: std.mem.Allocator,
             out_alloc: std.mem.Allocator,
             tables: *const Tables,
-            symbols: []const u16,
+            symbols: []const SymbolType,
         ) ![]u8 {
             if (symbols.len == 0) return Error.EmptyInput;
 
@@ -317,7 +334,7 @@ pub fn Tans(comptime scale_bits: u5) type {
             // Serialize
             const total_bits: u32 = @intCast(bits_buf.items.len);
             const bit_bytes: u32 = (total_bits + 7) / 8;
-            const header_size: u32 = 4 + 4 + 2 + 2 + @as(u32, tables.num_symbols) * 2;
+            const header_size: u32 = 4 + 4 + 2 + 4 + tables.num_symbols * 2;
             const total_size = header_size + bit_bytes;
 
             const result = try out_alloc.alloc(u8, total_size);
@@ -330,8 +347,8 @@ pub fn Tans(comptime scale_bits: u5) type {
             off += 4;
             std.mem.writeInt(u16, result[off..][0..2], scale_bits, .little);
             off += 2;
-            std.mem.writeInt(u16, result[off..][0..2], tables.num_symbols, .little);
-            off += 2;
+            std.mem.writeInt(u32, result[off..][0..4], tables.num_symbols, .little);
+            off += 4;
             for (0..tables.num_symbols) |si| {
                 std.mem.writeInt(u16, result[off..][0..2], tables.freqs[si], .little);
                 off += 2;
@@ -353,9 +370,10 @@ pub fn Tans(comptime scale_bits: u5) type {
         }
 
         /// Binary search for the encode slot matching (symbol, state).
-        fn findEncodeSlot(tables: *const Tables, sym: u16, state: u32) EncodeSlot {
-            const start = tables.enc_offsets[sym];
-            const end = tables.enc_offsets[sym + 1];
+        fn findEncodeSlot(tables: *const Tables, sym: SymbolType, state: u32) EncodeSlot {
+            const sym_idx: u32 = @intCast(sym);
+            const start = tables.enc_offsets[sym_idx];
+            const end = tables.enc_offsets[sym_idx + 1];
             const slots = tables.enc_slots[start..end];
 
             // Binary search: find the last slot where range_start <= state
@@ -375,11 +393,11 @@ pub fn Tans(comptime scale_bits: u5) type {
 
         // ── Decode ──
 
-        pub fn decodeData(arena: ArenaConfig, data: []const u8, count: u32) ![]u16 {
+        pub fn decodeData(arena: ArenaConfig, data: []const u8, count: u32) ![]SymbolType {
             return decodeImpl(arena.temp, arena.output, data, count);
         }
 
-        pub fn decodeUniform(allocator: std.mem.Allocator, data: []const u8, count: u32) ![]u16 {
+        pub fn decodeUniform(allocator: std.mem.Allocator, data: []const u8, count: u32) ![]SymbolType {
             return decodeImpl(allocator, allocator, data, count);
         }
 
@@ -388,8 +406,8 @@ pub fn Tans(comptime scale_bits: u5) type {
             out_alloc: std.mem.Allocator,
             data: []const u8,
             count: u32,
-        ) ![]u16 {
-            if (data.len < 12) return Error.InvalidData;
+        ) ![]SymbolType {
+            if (data.len < 14) return Error.InvalidData;
 
             var off: u32 = 0;
             var state = std.mem.readInt(u32, data[off..][0..4], .little);
@@ -399,8 +417,9 @@ pub fn Tans(comptime scale_bits: u5) type {
             const stored_scale = std.mem.readInt(u16, data[off..][0..2], .little);
             off += 2;
             if (stored_scale != scale_bits) return Error.InvalidData;
-            const num_syms = std.mem.readInt(u16, data[off..][0..2], .little);
-            off += 2;
+            const num_syms = std.mem.readInt(u32, data[off..][0..4], .little);
+            off += 4;
+            if (num_syms > MAX_ALPHABET) return Error.InvalidData;
 
             // Read frequencies
             const freqs = try temp_alloc.alloc(u16, num_syms);
@@ -418,7 +437,7 @@ pub fn Tans(comptime scale_bits: u5) type {
             var bit_pos: u32 = 0;
 
             // Decode forward
-            const result = try out_alloc.alloc(u16, count);
+            const result = try out_alloc.alloc(SymbolType, count);
 
             for (0..count) |di| {
                 if (state >= L) return Error.DecodeError;
@@ -459,7 +478,7 @@ pub fn Tans(comptime scale_bits: u5) type {
 const testing = std.testing;
 
 test "tANS: basic encode/decode round-trip" {
-    const T = Tans(10);
+    const T = Tans(10, u8);
     const raw_freqs = [_]u32{ 100, 50, 30, 20 };
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -467,18 +486,18 @@ test "tANS: basic encode/decode round-trip" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    const symbols = [_]u16{ 0, 1, 2, 3, 0, 0, 1, 2 };
+    const symbols = [_]u8{ 0, 1, 2, 3, 0, 0, 1, 2 };
     const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
     defer testing.allocator.free(encoded);
 
     const decoded = try T.decodeUniform(testing.allocator, encoded, @intCast(symbols.len));
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 test "tANS: two symbols equal frequency" {
-    const T = Tans(8);
+    const T = Tans(8, u8);
     const raw_freqs = [_]u32{ 50, 50 };
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -486,18 +505,18 @@ test "tANS: two symbols equal frequency" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    const symbols = [_]u16{ 0, 1, 0, 1, 1, 0 };
+    const symbols = [_]u8{ 0, 1, 0, 1, 1, 0 };
     const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
     defer testing.allocator.free(encoded);
 
     const decoded = try T.decodeUniform(testing.allocator, encoded, 6);
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 test "tANS: skewed distribution" {
-    const T = Tans(10);
+    const T = Tans(10, u8);
     const raw_freqs = [_]u32{ 900, 80, 15, 5 };
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -505,7 +524,7 @@ test "tANS: skewed distribution" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    var symbols: [100]u16 = undefined;
+    var symbols: [100]u8 = undefined;
     for (0..100) |i| {
         symbols[i] = if (i < 80) 0 else if (i < 90) 1 else if (i < 97) 2 else 3;
     }
@@ -516,11 +535,11 @@ test "tANS: skewed distribution" {
     const decoded = try T.decodeUniform(testing.allocator, encoded, 100);
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 test "tANS: single symbol" {
-    const T = Tans(8);
+    const T = Tans(8, u8);
     const raw_freqs = [_]u32{100};
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -528,18 +547,18 @@ test "tANS: single symbol" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    const symbols = [_]u16{ 0, 0, 0, 0, 0 };
+    const symbols = [_]u8{ 0, 0, 0, 0, 0 };
     const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
     defer testing.allocator.free(encoded);
 
     const decoded = try T.decodeUniform(testing.allocator, encoded, 5);
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 test "tANS: frequency quantization sums to SCALE" {
-    const T = Tans(10);
+    const T = Tans(10, u8);
     const raw_freqs = [_]u32{ 70, 20, 10 };
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -550,7 +569,7 @@ test "tANS: frequency quantization sums to SCALE" {
 }
 
 test "tANS: ArenaConfig variant" {
-    const T = Tans(8);
+    const T = Tans(8, u8);
     const arena = ArenaConfig.uniform(testing.allocator);
 
     const raw_freqs = [_]u32{ 60, 30, 10 };
@@ -560,18 +579,18 @@ test "tANS: ArenaConfig variant" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    const symbols = [_]u16{ 0, 1, 2, 0, 0, 1 };
+    const symbols = [_]u8{ 0, 1, 2, 0, 0, 1 };
     const encoded = try T.encodeData(arena, &tables, &symbols);
     defer testing.allocator.free(encoded);
 
     const decoded = try T.decodeData(arena, encoded, 6);
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 test "tANS: larger alphabet (10 symbols)" {
-    const T = Tans(10);
+    const T = Tans(10, u8);
     var raw_freqs: [10]u32 = undefined;
     for (0..10) |i| raw_freqs[i] = @intCast(10 + (10 - i) * 5);
 
@@ -581,7 +600,7 @@ test "tANS: larger alphabet (10 symbols)" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    var symbols: [50]u16 = undefined;
+    var symbols: [50]u8 = undefined;
     for (0..50) |i| symbols[i] = @intCast(i % 10);
 
     const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
@@ -590,5 +609,26 @@ test "tANS: larger alphabet (10 symbols)" {
     const decoded = try T.decodeUniform(testing.allocator, encoded, 50);
     defer testing.allocator.free(decoded);
 
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
+}
+
+test "tANS(10, u4): nibble alphabet round-trip" {
+    const T = Tans(10, u4);
+    const raw_freqs = [_]u32{ 8, 4, 2, 1, 1, 1, 1, 1 };
+    const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
+    defer testing.allocator.free(freqs);
+
+    var tables = try T.buildTables(testing.allocator, freqs);
+    defer T.freeTables(testing.allocator, &tables);
+
+    var symbols: [64]u4 = undefined;
+    for (0..64) |i| symbols[i] = @intCast(i % 8);
+
+    const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
+    defer testing.allocator.free(encoded);
+
+    const decoded = try T.decodeUniform(testing.allocator, encoded, 64);
+    defer testing.allocator.free(decoded);
+
+    try testing.expectEqualSlices(u4, &symbols, decoded);
 }

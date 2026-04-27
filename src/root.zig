@@ -33,6 +33,9 @@ pub const EliasFano = @import("succinct/elias_fano.zig").EliasFano;
 pub const Louds = @import("succinct/louds.zig").Louds;
 pub const Bwt = @import("encoding/bwt.zig").Bwt;
 pub const Mtf = @import("encoding/mtf.zig").Mtf;
+/// Convenience alias: `Mtf(u8)` — the byte-level MTF used in the classic
+/// BWT pipeline. Provided for ergonomics and backward compatibility.
+pub const ByteMtf = Mtf(u8);
 pub const FrontCoding = @import("encoding/front_coding.zig").FrontCoding;
 pub const WaveletTree = @import("succinct/wavelet_tree.zig").WaveletTree;
 pub const ContextModel0 = @import("encoding/context_model.zig").ContextModel0;

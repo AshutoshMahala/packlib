@@ -150,6 +150,31 @@ pub fn Louds(comptime IndexType: type) type {
             return readIdx(data, 0);
         }
 
+        /// Validate a serialized LOUDS blob. Call before querying
+        /// if the data comes from an untrusted source.
+        /// Returns `InvalidData` if the header is inconsistent or the
+        /// embedded rank/select section is malformed.
+        pub fn validate(data: []const u8) error{InvalidData}!void {
+            if (data.len < HEADER_SIZE) return error.InvalidData;
+
+            const n = readIdx(data, 0);
+            if (n == 0) return error.InvalidData;
+
+            // Ensure 2n + 1 fits in IndexType (bv_len computation in build).
+            const max_n: u64 = (@as(u64, std.math.maxInt(IndexType)) - 1) / 2;
+            if (@as(u64, n) > max_n) return error.InvalidData;
+
+            const rs = data[HEADER_SIZE..];
+            try RS.validate(rs);
+
+            // LOUDS invariant: bv_len = 2n + 1, total_ones = n (super-root +
+            // n - 1 internal edges = n; super-root contributes 1, each non-root
+            // node is reached by exactly one 1-bit ⇒ n total ones).
+            const bv_len: IndexType = @intCast(@as(u64, n) * 2 + 1);
+            if (RS.totalBits(rs) != bv_len) return error.InvalidData;
+            if (RS.totalOnes(rs) != n) return error.InvalidData;
+        }
+
         /// Access the rank/select data portion.
         inline fn rsData(data: []const u8) []const u8 {
             return data[HEADER_SIZE..];
@@ -504,4 +529,39 @@ test "LOUDS: space is approximately 2n+1 bits + overhead" {
     // Plus rank/select overhead + header
     // Should be well under 200 bytes for 7 nodes
     try testing.expect(data.len < 200);
+}
+
+test "LOUDS: validate accepts well-formed blob" {
+    const L = Louds(u32);
+    const degrees = [_]u32{ 2, 2, 1, 0, 0, 0 };
+    const data = try L.buildFromDegreesUniform(testing.allocator, &degrees);
+    defer testing.allocator.free(data);
+
+    try L.validate(data);
+}
+
+test "LOUDS: validate rejects truncated blob" {
+    const L = Louds(u32);
+    const degrees = [_]u32{ 2, 0, 0 };
+    const data = try L.buildFromDegreesUniform(testing.allocator, &degrees);
+    defer testing.allocator.free(data);
+
+    // Truncate header
+    try testing.expectError(error.InvalidData, L.validate(data[0..2]));
+    // Truncate inside the rank/select payload
+    try testing.expectError(error.InvalidData, L.validate(data[0 .. data.len - 1]));
+}
+
+test "LOUDS: validate rejects mismatched node count" {
+    const L = Louds(u32);
+    const degrees = [_]u32{ 2, 0, 0 };
+    const data = try L.buildFromDegreesUniform(testing.allocator, &degrees);
+    defer testing.allocator.free(data);
+
+    var corrupted = try testing.allocator.dupe(u8, data);
+    defer testing.allocator.free(corrupted);
+
+    // Bump num_nodes — bv_len no longer matches embedded RS.
+    std.mem.writeInt(u32, corrupted[0..4], 99, .little);
+    try testing.expectError(error.InvalidData, L.validate(corrupted));
 }

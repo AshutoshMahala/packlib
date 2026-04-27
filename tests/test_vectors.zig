@@ -665,7 +665,7 @@ test "BWT vector: 'abracadabra' round-trip" {
 test "MTF vector: 'bananaaa' → known output" {
     // Source: Wikipedia "Move-to-front transform"
     // 'b'=98,'a'=97,'n'=110,'a'→1,'n'→2,'a'→1,'a'→0,'a'→0
-    const Mtf = packlib.Mtf;
+    const Mtf = packlib.Mtf(u8);
     const input = "bananaaa";
     const result = try Mtf.forwardUniform(testing.allocator, input);
     defer testing.allocator.free(result);
@@ -695,7 +695,7 @@ test "MTF vector: 'bananaaa' → known output" {
 
 test "BWT+MTF pipeline vector: round-trip on 'mississippi'" {
     const Bwt = packlib.Bwt(u32);
-    const Mtf = packlib.Mtf;
+    const Mtf = packlib.Mtf(u8);
 
     const input = "mississippi";
     const bwt_data = try Bwt.forwardUniform(testing.allocator, input);
@@ -733,7 +733,7 @@ test "BWT+MTF pipeline vector: round-trip on 'mississippi'" {
 // ═══════════════════════════════════════════════════════════════
 
 test "Elias-Fano vector: monotone sequence access and successor" {
-    const EF = packlib.EliasFano(u32);
+    const EF = packlib.EliasFano(u32, u32);
     const values = [_]u32{ 2, 3, 5, 7, 11, 13, 24 };
     const data = try EF.buildUniform(testing.allocator, &values);
     defer testing.allocator.free(data);
@@ -764,7 +764,7 @@ test "Elias-Fano vector: monotone sequence access and successor" {
 // ═══════════════════════════════════════════════════════════════
 
 test "rANS vector: encode/decode with known frequency distribution" {
-    const R = packlib.Rans(12);
+    const R = packlib.Rans(12, u8);
     const raw_freqs = [_]u32{ 3, 1 };
     var table = try R.buildFreqTable(testing.allocator, &raw_freqs);
     defer R.freeFreqTable(testing.allocator, &table);
@@ -773,7 +773,7 @@ test "rANS vector: encode/decode with known frequency distribution" {
     try testing.expectEqual(@as(u32, 4096), table.cumul[table.num_symbols]);
 
     // 75%/25% skew, encode 200 symbols
-    var symbols: [200]u16 = undefined;
+    var symbols: [200]u8 = undefined;
     for (0..200) |i| symbols[i] = if (i % 4 == 0) 1 else 0;
 
     const encoded = try R.encodeUniform(testing.allocator, &table, &symbols);
@@ -784,7 +784,7 @@ test "rANS vector: encode/decode with known frequency distribution" {
 
     const decoded = try R.decodeUniform(testing.allocator, encoded, 200);
     defer testing.allocator.free(decoded);
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -793,7 +793,7 @@ test "rANS vector: encode/decode with known frequency distribution" {
 // ═══════════════════════════════════════════════════════════════
 
 test "tANS vector: encode/decode with known frequency distribution" {
-    const T = packlib.Tans(10);
+    const T = packlib.Tans(10, u8);
     const raw_freqs = [_]u32{ 3, 1 };
     const freqs = try T.quantizeFreqs(testing.allocator, &raw_freqs);
     defer testing.allocator.free(freqs);
@@ -806,7 +806,7 @@ test "tANS vector: encode/decode with known frequency distribution" {
     var tables = try T.buildTables(testing.allocator, freqs);
     defer T.freeTables(testing.allocator, &tables);
 
-    var symbols: [100]u16 = undefined;
+    var symbols: [100]u8 = undefined;
     for (0..100) |i| symbols[i] = if (i % 4 == 0) 1 else 0;
 
     const encoded = try T.encodeUniform(testing.allocator, &tables, &symbols);
@@ -814,7 +814,7 @@ test "tANS vector: encode/decode with known frequency distribution" {
 
     const decoded = try T.decodeUniform(testing.allocator, encoded, 100);
     defer testing.allocator.free(decoded);
-    try testing.expectEqualSlices(u16, &symbols, decoded);
+    try testing.expectEqualSlices(u8, &symbols, decoded);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -859,7 +859,7 @@ test "LOUDS vector: binary tree navigation" {
 // ═══════════════════════════════════════════════════════════════
 
 test "FrontCoding vector: sorted strings with shared prefixes" {
-    const FC = packlib.FrontCoding(u32);
+    const FC = packlib.FrontCoding(u32, u16);
     const strings = [_][]const u8{
         "compact",
         "compare",
